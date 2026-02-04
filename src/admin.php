@@ -598,7 +598,12 @@ $subscriberStats = getSubscriberStats($pdo);
 $schedules = getUpcomingSchedule($pdo, 14);
 $events = $pdo->query("SELECT * FROM events ORDER BY ts DESC LIMIT 20")->fetchAll(PDO::FETCH_ASSOC);
 $apiStats = getApiStats($pdo);
-$lastRequest = $pdo->query("SELECT * FROM request_logs ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
+$lastRequest = null;
+try {
+    $lastRequest = $pdo->query("SELECT * FROM request_logs ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
+} catch (Throwable $e) {
+    $lastRequest = null;
+}
 $notificationTemplates = getNotificationTemplates($pdo);
 
 // Read schedule settings from DB
