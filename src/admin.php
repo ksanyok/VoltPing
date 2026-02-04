@@ -383,6 +383,20 @@ if ($isAuthenticated && isset($_GET['api'])) {
                 echo json_encode(['ok' => false, 'error' => 'Токен бота не налаштовано']);
                 exit;
             }
+
+            $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+            $scriptPath = (string)dirname((string)($_SERVER['SCRIPT_NAME'] ?? '/src/admin.php'));
+            $scriptPath = $scriptPath === '/' ? '' : rtrim($scriptPath, '/');
+            $xfProto = (string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '');
+            $protocol = 'https';
+            if ($xfProto !== '') {
+                $protocol = trim(explode(',', $xfProto)[0]);
+            } elseif (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+                $protocol = 'https';
+            } elseif (preg_match('/^(localhost|127\\.0\\.0\\.1)(:\\d+)?$/', $host)) {
+                $protocol = 'http';
+            }
+            $expectedWebhookUrl = $host !== '' ? "{$protocol}://{$host}{$scriptPath}/bot.php" : '';
             
             $url = "https://api.telegram.org/bot{$botToken}/getWebhookInfo";
             $ch = curl_init($url);
@@ -402,6 +416,7 @@ if ($isAuthenticated && isset($_GET['api'])) {
             echo json_encode([
                 'ok' => true,
                 'webhook' => $data['result'],
+                'expected_url' => $expectedWebhookUrl,
             ], JSON_UNESCAPED_UNICODE);
             exit;
             
@@ -413,9 +428,24 @@ if ($isAuthenticated && isset($_GET['api'])) {
             }
             
             // Determine the webhook URL
-            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-            $host = $_SERVER['HTTP_HOST'];
-            $scriptPath = dirname($_SERVER['SCRIPT_NAME']);
+            $host = (string)($_SERVER['HTTP_HOST'] ?? '');
+            if ($host === '') {
+                echo json_encode(['ok' => false, 'error' => 'Не вдалося визначити HTTP_HOST для webhook URL']);
+                exit;
+            }
+            $scriptPath = (string)dirname((string)($_SERVER['SCRIPT_NAME'] ?? '/src/admin.php'));
+            $scriptPath = $scriptPath === '/' ? '' : rtrim($scriptPath, '/');
+            $xfProto = (string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '');
+            $protocol = 'https';
+            if ($xfProto !== '') {
+                $protocol = trim(explode(',', $xfProto)[0]);
+            } elseif (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+                $protocol = 'https';
+            } elseif (preg_match('/^(localhost|127\\.0\\.0\\.1)(:\\d+)?$/', $host)) {
+                $protocol = 'http';
+            }
+            // Telegram webhook must be HTTPS for real hosts; we default to https unless localhost.
+            if ($protocol !== 'http') $protocol = 'https';
             $webhookUrl = "{$protocol}://{$host}{$scriptPath}/bot.php";
             
             $url = "https://api.telegram.org/bot{$botToken}/setWebhook";
