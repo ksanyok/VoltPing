@@ -568,7 +568,7 @@ function isScheduledOutageNow(PDO $pdo): ?array {
 function getTodayStats(PDO $pdo): array {
     $dayStart = strtotime('today 00:00:00');
     
-    $stmt = $pdo->prepare("SELECT event_type, ts FROM events WHERE ts >= :start ORDER BY ts ASC");
+    $stmt = $pdo->prepare("SELECT type, ts FROM events WHERE ts >= :start ORDER BY ts ASC");
     $stmt->execute([':start' => $dayStart]);
     $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
@@ -584,7 +584,7 @@ function getTodayStats(PDO $pdo): array {
         } else {
             $offSeconds += $duration;
         }
-        $prevState = $e['event_type'];
+        $prevState = $e['type'];
         $prevTs = (int)$e['ts'];
     }
     
