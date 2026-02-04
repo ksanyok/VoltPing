@@ -59,8 +59,12 @@ function envBool(string $key, bool $default): bool {
     return in_array(strtolower((string)$v), ['1', 'true', 'yes', 'on'], true);
 }
 
-// Load .env file
-loadEnvFile(__DIR__ . '/.env');
+// Load .env file (try both src/ and parent directory)
+if (file_exists(__DIR__ . '/.env')) {
+    loadEnvFile(__DIR__ . '/.env');
+} else {
+    loadEnvFile(dirname(__DIR__) . '/.env');
+}
 
 // Timezone
 date_default_timezone_set((string)env('TIMEZONE', 'Europe/Kyiv'));

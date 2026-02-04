@@ -14,8 +14,23 @@ $pdo = getDatabase($config);
 // ==================== AUTO-CLEANUP OLD RECORDS ====================
 function cleanupOldRecords(PDO $pdo, int $retentionDays = 30): void {
     $cutoff = time() - ($retentionDays * 86400);
-    $pdo->prepare("DELETE FROM events WHERE ts < ?")->execute([$cutoff]);
-    $pdo->prepare("DELETE FROM api_stats WHERE ts < ?")->execute([$cutoff]);
+    
+    // Clean events table
+    try {
+        $pdo->prepare("DELETE FROM events WHERE ts < ?")->execute([$cutoff]);
+    } catch (PDOException $e) {
+        // Table might not exist yet
+    }
+    
+    // Clean api_stats table if exists
+    try {
+        $tables = $pdo->query("SELECT name FROM sqlite_master WHERE type='table' AND name='api_stats'")->fetchColumn();
+        if ($tables) {
+            $pdo->prepare("DELETE FROM api_stats WHERE ts < ?")->execute([$cutoff]);
+        }
+    } catch (PDOException $e) {
+        // Ignore errors
+    }
 }
 
 // Run cleanup on each request (low overhead with indexed tables)
@@ -218,7 +233,8 @@ if ($isAuthenticated && isset($_GET['api'])) {
                 exit;
             }
             
-            $envPath = dirname(__DIR__) . '/.env';
+            // Find .env file location
+            $envPath = file_exists(__DIR__ . '/.env') ? __DIR__ . '/.env' : dirname(__DIR__) . '/.env';
             $envContent = file_exists($envPath) ? file_get_contents($envPath) : '';
             
             foreach ($input as $key => $value) {
