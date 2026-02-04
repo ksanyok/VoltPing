@@ -301,13 +301,12 @@ function buildAboutText(PDO $pdo, array $cfg): string {
     // Визначаємо URL адмін-панелі
     $adminUrl = (string)($cfg['admin_url'] ?? '');
     if ($adminUrl === '') {
-        // Пробуємо визначити автоматично з bot.php URL
-        $st = $pdo->query("SELECT value FROM settings WHERE key = 'webhook_url'");
-        $webhookUrl = $st !== false ? $st->fetchColumn() : false;
-        if ($webhookUrl && is_string($webhookUrl)) {
+        // Пробуємо визначити автоматично з bot.php URL (зберігається в state як webhook_url)
+        $webhookUrl = (string)dbGet($pdo, 'webhook_url', '');
+        if ($webhookUrl !== '') {
             // Отримуємо домен з webhook URL (https://example.com/src/bot.php -> https://example.com)
             $parsed = parse_url($webhookUrl);
-            if ($parsed !== false && isset($parsed['scheme']) && isset($parsed['host'])) {
+            if ($parsed !== false && isset($parsed['scheme'], $parsed['host'])) {
                 $adminUrl = $parsed['scheme'] . '://' . $parsed['host'];
             }
         }
@@ -583,6 +582,7 @@ function actionFromText(string $text): string {
 
 // Read webhook input
 $input = file_get_contents('php://input');
+
 if ($input === false || $input === '') {
     echo 'ok';
     exit;
@@ -594,15 +594,32 @@ if (!is_array($update)) {
     exit;
 }
 
-// Handle callback queries
+// Handle callback queries (inline button presses)
 $callback = $update['callback_query'] ?? null;
 if (is_array($callback)) {
     $callbackId = (string)($callback['id'] ?? '');
+    $callbackData = trim((string)($callback['data'] ?? ''));
+    $callbackMessage = $callback['message'] ?? [];
+    $callbackChat = $callbackMessage['chat'] ?? [];
+    $callbackChatId = (int)($callbackChat['id'] ?? 0);
+    
+    // Answer callback immediately
     if ($callbackId !== '') {
         try {
             tgRequest((string)$config['tg_token'], 'answerCallbackQuery', ['callback_query_id' => $callbackId]);
         } catch (Throwable $e) {}
     }
+    
+    // Process callback action if we have chat_id and data
+    if ($callbackChatId > 0 && $callbackData !== '') {
+        try {
+            $action = actionFromText($callbackData);
+            handleBotAction($pdo, $config, $callbackChatId, $action, $callback['from'] ?? [], $callbackChat);
+        } catch (Throwable $e) {
+            // ignore
+        }
+    }
+    
     echo 'ok';
     exit;
 }
@@ -683,7 +700,27 @@ try {
     
     // Handle button actions
     $action = actionFromText($text);
+    handleBotAction($pdo, $config, $chatId, $action, $from, $chat);
     
+} catch (Throwable $e) {
+    error_log("Bot error: " . $e->getMessage());
+    @file_put_contents(
+        __DIR__ . '/../data/bot_errors.log',
+        date('Y-m-d H:i:s')
+            . ' | ' . get_class($e)
+            . ' | ' . $e->getMessage()
+            . "\n" . $e->getTraceAsString()
+            . "\n---\n",
+        FILE_APPEND
+    );
+}
+
+echo 'ok';
+exit;
+
+// ==================== ACTION HANDLER ====================
+
+function handleBotAction(PDO $pdo, array $config, int $chatId, string $action, array $from, array $chat): void {
     switch ($action) {
         case 'dashboard':
             updateSubscriberDashboard($pdo, $config, $chatId, true);
@@ -778,15 +815,9 @@ try {
             break;
             
         default:
-            // Unknown command - just ignore or send help
-            if ($text !== '') {
-                sendBotMessage($config, $chatId, "❓ Невідома команда.\n\nВикористовуйте кнопки меню нижче або надішліть /help");
-            }
+            // Unknown action, send main menu
+            sendBotMessage($config, $chatId, "Оберіть дію:", true);
             break;
     }
-} catch (Throwable $e) {
-    // Log error but don't fail webhook
-    error_log("Bot error: " . $e->getMessage());
 }
 
-echo 'ok';
