@@ -364,6 +364,33 @@ $lastCheckTs = $lastState['check_ts'];
 $lastPowerTs = $lastState['power_ts'];
 $lastVoltTs = $lastState['voltage_ts'];
 
+// Enforce polling interval (cron can run more frequently)
+$intervalSeconds = max(1, (int)($config['check_interval_seconds'] ?? 60));
+if (!$forceCheck && $lastCheckTs > 0) {
+    $elapsed = $now - (int)$lastCheckTs;
+    if ($elapsed >= 0 && $elapsed < $intervalSeconds) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode([
+            'ok' => true,
+            'skipped' => true,
+            'reason' => 'interval',
+            'ts' => $now,
+            'datetime' => date('Y-m-d H:i:s', $now),
+            'interval_seconds' => $intervalSeconds,
+            'last_check_ts' => (int)$lastCheckTs,
+            'next_check_in' => $intervalSeconds - $elapsed,
+            'state' => [
+                'power' => $lastPowerState,
+                'voltage' => $lastVoltState,
+                'voltage_value' => $lastState['voltage'] ?? null,
+                'online' => $lastState['device_online'] ?? null,
+                'method' => $lastState['connection_mode'] ?? null,
+            ],
+        ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+}
+
 // Poll device
 $result = pollDevice($config, $pdo);
 
