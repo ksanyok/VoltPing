@@ -552,14 +552,46 @@ $durText = fmtDur($duration);
     </div>
     
     <script>
+    // roundRect polyfill for older browsers
+    if (CanvasRenderingContext2D && !CanvasRenderingContext2D.prototype.roundRect) {
+        CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+            const radius = typeof r === 'number' ? { tl: r, tr: r, br: r, bl: r } : r;
+            this.beginPath();
+            this.moveTo(x + radius.tl, y);
+            this.lineTo(x + w - radius.tr, y);
+            this.quadraticCurveTo(x + w, y, x + w, y + radius.tr);
+            this.lineTo(x + w, y + h - radius.br);
+            this.quadraticCurveTo(x + w, y + h, x + w - radius.br, y + h);
+            this.lineTo(x + radius.bl, y + h);
+            this.quadraticCurveTo(x, y + h, x, y + h - radius.bl);
+            this.lineTo(x, y + radius.tl);
+            this.quadraticCurveTo(x, y, x + radius.tl, y);
+            return this;
+        };
+    }
+
     class VoltageChart {
         constructor(canvas) {
             this.canvas = canvas;
             this.ctx = canvas.getContext('2d');
             this.data = [];
             this.hours = 6;
+            this.hover = null;
             this.resize();
             window.addEventListener('resize', () => this.resize());
+
+            canvas.addEventListener('mousemove', (e) => {
+                const rect = canvas.getBoundingClientRect();
+                this.hover = {
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top,
+                };
+                this.draw();
+            });
+            canvas.addEventListener('mouseleave', () => {
+                this.hover = null;
+                this.draw();
+            });
         }
         
         resize() {
@@ -638,6 +670,11 @@ $durText = fmtDur($duration);
                     ctx.moveTo(pad.left, y);
                     ctx.lineTo(w - pad.right, y);
                     ctx.stroke();
+
+                    ctx.fillStyle = 'rgba(34, 197, 94, 0.8)';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(v + 'V', w - pad.right - 32, y - 3);
                 }
             });
             
@@ -649,6 +686,11 @@ $durText = fmtDur($duration);
                     ctx.moveTo(pad.left, y);
                     ctx.lineTo(w - pad.right, y);
                     ctx.stroke();
+
+                    ctx.fillStyle = 'rgba(239, 68, 68, 0.8)';
+                    ctx.font = '10px sans-serif';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(v + 'V', w - pad.right - 32, y - 3);
                 }
             });
             
@@ -680,6 +722,18 @@ $durText = fmtDur($duration);
                 prevOff = false;
             });
             ctx.stroke();
+
+            // Point markers
+            ctx.fillStyle = 'rgba(6, 182, 212, 0.9)';
+            data.forEach((d) => {
+                const x = pad.left + ((d.ts - timeStart) / timeRange) * (w - pad.left - pad.right);
+                const isOff = d.power_state === 'OFF' || d.voltage < 50;
+                if (isOff) return;
+                const y = pad.top + (1 - (d.voltage - minV) / (maxV - minV)) * (h - pad.top - pad.bottom);
+                ctx.beginPath();
+                ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+                ctx.fill();
+            });
             
             ctx.fillStyle = 'rgba(239, 68, 68, 0.15)';
             let offStart = null;
@@ -710,6 +764,67 @@ $durText = fmtDur($duration);
                 const x = pad.left + (i / labelCount) * (w - pad.left - pad.right);
                 const date = new Date(t * 1000);
                 ctx.fillText(date.getHours().toString().padStart(2, '0') + ':' + date.getMinutes().toString().padStart(2, '0'), x, h - 8);
+            }
+
+            // Hover tooltip
+            if (this.hover) {
+                const hx = Math.min(Math.max(this.hover.x, pad.left), w - pad.right);
+                const targetTs = timeStart + ((hx - pad.left) / (w - pad.left - pad.right)) * timeRange;
+                let best = null;
+                let bestDist = Infinity;
+                for (const d of data) {
+                    const dist = Math.abs(d.ts - targetTs);
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        best = d;
+                    }
+                }
+                if (best) {
+                    const x = pad.left + ((best.ts - timeStart) / timeRange) * (w - pad.left - pad.right);
+                    const isOff = best.power_state === 'OFF' || best.voltage < 50;
+                    const y = isOff
+                        ? (h - pad.bottom - 5)
+                        : pad.top + (1 - (best.voltage - minV) / (maxV - minV)) * (h - pad.top - pad.bottom);
+
+                    // crosshair
+                    ctx.strokeStyle = 'rgba(232, 232, 240, 0.15)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.moveTo(x, pad.top);
+                    ctx.lineTo(x, h - pad.bottom);
+                    ctx.stroke();
+
+                    // marker
+                    ctx.fillStyle = isOff ? 'rgba(239, 68, 68, 0.9)' : 'rgba(6, 182, 212, 1)';
+                    ctx.beginPath();
+                    ctx.arc(x, y, 4, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const dt = new Date(best.ts * 1000);
+                    const hh = dt.getHours().toString().padStart(2, '0');
+                    const mm = dt.getMinutes().toString().padStart(2, '0');
+                    const label = isOff ? `${hh}:${mm}  OFF` : `${hh}:${mm}  ${Math.round(best.voltage)}V`;
+
+                    ctx.font = '12px sans-serif';
+                    const tw = ctx.measureText(label).width;
+                    const boxW = tw + 12;
+                    const boxH = 22;
+                    let bx = x + 10;
+                    let by = pad.top + 6;
+                    if (bx + boxW > w - pad.right) bx = x - 10 - boxW;
+
+                    ctx.fillStyle = 'rgba(18, 18, 26, 0.92)';
+                    ctx.strokeStyle = 'rgba(42, 42, 58, 0.9)';
+                    ctx.lineWidth = 1;
+                    ctx.beginPath();
+                    ctx.roundRect(bx, by, boxW, boxH, 6);
+                    ctx.fill();
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#e8e8f0';
+                    ctx.textAlign = 'left';
+                    ctx.fillText(label, bx + 6, by + 15);
+                }
             }
         }
     }

@@ -634,6 +634,13 @@ try {
 } catch (Throwable $e) {
     $lastRequest = null;
 }
+$recentPolls = [];
+try {
+    $recentPolls = $pdo->query("SELECT ts, request_type, response_code, voltage, power_state, device_online, latency_ms, error_msg FROM request_logs ORDER BY ts DESC LIMIT 20")
+        ->fetchAll(PDO::FETCH_ASSOC) ?: [];
+} catch (Throwable $e) {
+    $recentPolls = [];
+}
 $notificationTemplates = getNotificationTemplates($pdo);
 
 // Read schedule settings from DB
@@ -1149,6 +1156,42 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
             <div style="margin-top: 1rem; text-align: center;">
                 <a href="?tab=history" class="btn btn-outline btn-sm">📋 Вся історія</a>
             </div>
+
+            <div class="card-title" style="margin-top: 1.25rem;">🧪 Останні перевірки</div>
+            <table>
+                <thead><tr><th>Час</th><th>V</th><th>Статус</th><th>Метод</th><th>ms</th></tr></thead>
+                <tbody>
+                <?php if (count($recentPolls) === 0): ?>
+                    <tr><td colspan="5" style="color: var(--muted);">Немає даних (таблиця request_logs порожня)</td></tr>
+                <?php else: ?>
+                    <?php foreach (array_slice($recentPolls, 0, 10) as $r): ?>
+                        <?php
+                        $rOnline = isset($r['device_online']) ? ((int)$r['device_online'] === 1) : null;
+                        $rPower = strtoupper(trim((string)($r['power_state'] ?? '')));
+                        $rVoltage = isset($r['voltage']) && $r['voltage'] !== null ? round((float)$r['voltage']) . 'V' : '—';
+                        $rMethod = (string)($r['request_type'] ?? '');
+                        $rMs = isset($r['latency_ms']) && $r['latency_ms'] !== null ? (int)$r['latency_ms'] : null;
+                        $rTs = (int)($r['ts'] ?? 0);
+                        ?>
+                        <tr>
+                            <td><?= $rTs > 0 ? date('d.m H:i:s', $rTs) : '—' ?></td>
+                            <td><?= $rVoltage ?></td>
+                            <td>
+                                <?php if ($rOnline === true): ?>
+                                    🟢 <?= $rPower === 'OFF' ? 'OFF' : 'ON' ?>
+                                <?php elseif ($rOnline === false): ?>
+                                    🔴 OFFLINE
+                                <?php else: ?>
+                                    —
+                                <?php endif; ?>
+                            </td>
+                            <td><?= h($rMethod !== '' ? $rMethod : '—') ?></td>
+                            <td><?= $rMs !== null ? $rMs : '—' ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                <?php endif; ?>
+                </tbody>
+            </table>
         </div>
         
         <div class="card">
