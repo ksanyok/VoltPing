@@ -191,6 +191,23 @@ function ensureDb(PDO $pdo): void {
         voltage REAL NULL,
         note TEXT NULL
     )");
+
+    // Migrations for older installs
+    try {
+        $cols = $pdo->query("PRAGMA table_info(events)")->fetchAll(PDO::FETCH_ASSOC) ?: [];
+        $colNames = array_map(static fn($r) => (string)($r['name'] ?? ''), $cols);
+        if (!in_array('state', $colNames, true)) {
+            $pdo->exec("ALTER TABLE events ADD COLUMN state TEXT NULL");
+        }
+        if (!in_array('note', $colNames, true)) {
+            $pdo->exec("ALTER TABLE events ADD COLUMN note TEXT NULL");
+        }
+        if (!in_array('voltage', $colNames, true)) {
+            $pdo->exec("ALTER TABLE events ADD COLUMN voltage REAL NULL");
+        }
+    } catch (Throwable $e) {
+        // Non-fatal: keep app running even if ALTER TABLE fails
+    }
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts)");
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)");
     
