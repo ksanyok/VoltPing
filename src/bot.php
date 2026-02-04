@@ -296,7 +296,24 @@ function buildWelcomeText(PDO $pdo, array $cfg): string {
 function buildAboutText(PDO $pdo, array $cfg): string {
     $title = getBaseTitle($cfg);
     $botLink = resolveBotLink($pdo, $cfg);
-    $botLine = $botLink !== null ? "\n🤖 {$botLink}" : "";
+    $botLine = $botLink !== null ? "🤖 {$botLink}\n" : "";
+    
+    // Визначаємо URL адмін-панелі
+    $adminUrl = (string)($cfg['admin_url'] ?? '');
+    if ($adminUrl === '') {
+        // Пробуємо визначити автоматично з bot.php URL
+        $st = $pdo->query("SELECT value FROM settings WHERE key = 'webhook_url'");
+        $webhookUrl = $st !== false ? $st->fetchColumn() : false;
+        if ($webhookUrl && is_string($webhookUrl)) {
+            // Отримуємо домен з webhook URL (https://example.com/src/bot.php -> https://example.com)
+            $parsed = parse_url($webhookUrl);
+            if ($parsed !== false && isset($parsed['scheme']) && isset($parsed['host'])) {
+                $adminUrl = $parsed['scheme'] . '://' . $parsed['host'];
+            }
+        }
+    }
+    $adminLine = $adminUrl !== '' ? "🌐 Панель: {$adminUrl}\n" : "";
+    
     $notifyLine = buildNotifyStatusLine(getNotifyConfig($pdo, $cfg));
     $apiStats = getApiStats($pdo);
     
@@ -304,11 +321,14 @@ function buildAboutText(PDO $pdo, array $cfg): string {
         . "🏘 Об'єкт: {$title}\n"
         . "📊 API за сьогодні: {$apiStats['today']}\n"
         . "📊 API за місяць: {$apiStats['month']}/30000\n\n"
+        . $botLine
+        . $adminLine
+        . "\n"
         . "⚡ VoltPing — Система моніторингу електропостачання\n\n"
         . "👨‍💻 Автор: Aleksandr Krykun\n"
-        . "📱 Контакт: @buyreadysite\n"
-        . "🔗 GitHub: github.com/ksanyok/VoltPing"
-        . $botLine;
+        . "📱 Telegram: @buyreadysite\n"
+        . "🌐 Сайт: buyreadysite.com\n"
+        . "🔗 GitHub: github.com/ksanyok/VoltPing";
 }
 
 function buildSettingsText(PDO $pdo, array $cfg): string {
