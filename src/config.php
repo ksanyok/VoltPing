@@ -295,6 +295,9 @@ function ensureDb(PDO $pdo): void {
     $pdo->exec("CREATE INDEX IF NOT EXISTS idx_voltage_log_ts ON voltage_log(ts)");
     
     // Ensure columns exist (for upgrades)
+    ensureColumn($pdo, 'bot_subscribers', 'last_name', 'TEXT NULL');
+    ensureColumn($pdo, 'bot_subscribers', 'started_ts', 'INTEGER NULL');
+    ensureColumn($pdo, 'bot_subscribers', 'updated_ts', 'INTEGER NULL');
     ensureColumn($pdo, 'bot_subscribers', 'dashboard_msg_id', 'INTEGER NULL');
     ensureColumn($pdo, 'bot_subscribers', 'dashboard_updated_ts', 'INTEGER NULL');
     ensureColumn($pdo, 'bot_subscribers', 'dashboard_msg_ts', 'INTEGER NULL');
