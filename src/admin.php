@@ -530,8 +530,8 @@ if ($isAuthenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['a
             $note = $_POST['note'] ?? '';
             
             if ($date && $timeStart && $timeEnd) {
-                $stmt = $pdo->prepare("INSERT INTO schedule (date, time_start, time_end, note, source) VALUES (?, ?, ?, ?, 'manual')");
-                $stmt->execute([$date, $timeStart, $timeEnd, $note]);
+                $stmt = $pdo->prepare("INSERT INTO schedule (date, time_start, time_end, note, created_ts) VALUES (?, ?, ?, ?, ?)");
+                $stmt->execute([$date, $timeStart, $timeEnd, $note, time()]);
                 $flash = '✅ Графік додано';
                 $flashType = 'success';
             }
@@ -598,6 +598,7 @@ $subscriberStats = getSubscriberStats($pdo);
 $schedules = getUpcomingSchedule($pdo, 14);
 $events = $pdo->query("SELECT * FROM events ORDER BY ts DESC LIMIT 20")->fetchAll(PDO::FETCH_ASSOC);
 $apiStats = getApiStats($pdo);
+$lastRequest = $pdo->query("SELECT * FROM request_logs ORDER BY ts DESC LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: null;
 $notificationTemplates = getNotificationTemplates($pdo);
 
 // Read schedule settings from DB
@@ -1051,8 +1052,20 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
     <div class="grid grid-4">
         <div class="card">
             <div class="card-title">💡 Статус</div>
-            <div class="stat-value <?= ($state['power_state'] ?? '') === 'LIGHT_ON' ? 'status-on' : 'status-off' ?>">
-                <?= ($state['power_state'] ?? '') === 'LIGHT_ON' ? 'ВКЛ' : 'ВИКЛ' ?>
+            <?php
+            $powerState = (string)($state['power_state'] ?? 'UNKNOWN');
+            $isOn = ($powerState === 'ON');
+            $isOnline = (bool)($state['device_online'] ?? false);
+            $lastCheckTs = (int)($state['check_ts'] ?? 0);
+            ?>
+            <div class="stat-value <?= $isOn ? 'status-on' : 'status-off' ?>">
+                <?= $isOn ? 'ВКЛ' : 'ВИКЛ' ?>
+            </div>
+            <div class="stat-label">
+                <?= $isOnline ? '🟢 Online' : '🔴 Offline' ?>
+                <?php if ($lastCheckTs > 0): ?>
+                    · <?= date('d.m H:i:s', $lastCheckTs) ?>
+                <?php endif; ?>
             </div>
         </div>
         <div class="card">
@@ -1111,6 +1124,28 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
                     🔄 Примусова перевірка
                 </button>
             </form>
+
+            <div class="card-title" style="margin-top: 1rem;">📶 З’єднання</div>
+            <div class="api-calc">
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Метод:</span>
+                    <span class="api-calc-value"><?= h((string)($state['connection_mode'] ?? '—')) ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Latency:</span>
+                    <span class="api-calc-value"><?= $lastRequest && isset($lastRequest['latency_ms']) ? (int)$lastRequest['latency_ms'] . ' ms' : '—' ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">HTTP:</span>
+                    <span class="api-calc-value"><?= $lastRequest && isset($lastRequest['response_code']) ? (int)$lastRequest['response_code'] : '—' ?></span>
+                </div>
+                <?php if ($lastRequest && !empty($lastRequest['error_msg'])): ?>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Помилка:</span>
+                    <span class="api-calc-value" style="color: var(--danger);"><?= h((string)$lastRequest['error_msg']) ?></span>
+                </div>
+                <?php endif; ?>
+            </div>
             
             <div class="card-title" style="margin-top: 1rem;">📊 API ліміти</div>
             <div class="api-calc">
