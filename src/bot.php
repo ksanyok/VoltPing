@@ -75,6 +75,17 @@ function setSubscriberActive(PDO $pdo, int $chatId, bool $active, array $cfg): v
 
 // ==================== DASHBOARD ====================
 
+function inferPowerState(array $state, array $cfg): string {
+    $ps = strtoupper(trim((string)($state['power_state'] ?? 'UNKNOWN')));
+    if ($ps === 'ON' || $ps === 'OFF') return $ps;
+
+    $voltage = (float)($state['voltage'] ?? 0.0);
+    $threshold = (float)($cfg['voltage_on_threshold'] ?? 50.0);
+
+    if ($voltage <= 0.0) return 'OFF';
+    return $voltage >= $threshold ? 'ON' : 'OFF';
+}
+
 function getSubscriberDashboardId(PDO $pdo, int $chatId): ?int {
     $st = $pdo->prepare("SELECT dashboard_msg_id FROM bot_subscribers WHERE chat_id = :id");
     $st->execute([':id' => $chatId]);
@@ -87,13 +98,14 @@ function setSubscriberDashboardId(PDO $pdo, int $chatId, ?int $msgId): void {
     $st->execute([':msg_id' => $msgId, ':ts' => time(), ':chat_id' => $chatId]);
 }
 
-function buildBotDashboardText(array $state, array $stats, string $title, string $notifyLine, PDO $pdo): string {
-    $powerEmoji = match ($state['power_state'] ?? 'UNKNOWN') {
+function buildBotDashboardText(array $state, array $stats, string $title, string $notifyLine, array $cfg, PDO $pdo): string {
+    $resolvedPower = inferPowerState($state, $cfg);
+    $powerEmoji = match ($resolvedPower) {
         'ON' => '✅',
         'OFF' => '❌',
         default => '❓',
     };
-    $powerText = match ($state['power_state'] ?? 'UNKNOWN') {
+    $powerText = match ($resolvedPower) {
         'ON' => 'Є',
         'OFF' => 'Немає',
         default => 'Невідомо',
@@ -128,7 +140,7 @@ function updateSubscriberDashboard(PDO $pdo, array $cfg, int $chatId, bool $forc
     $stats = getSubscriberStats($pdo);
     $title = getBaseTitle($cfg);
     $notifyLine = buildNotifyStatusLine(getNotifyConfig($pdo, $cfg));
-    $text = buildBotDashboardText($state, $stats, $title, $notifyLine, $pdo);
+    $text = buildBotDashboardText($state, $stats, $title, $notifyLine, $cfg, $pdo);
     $msgId = getSubscriberDashboardId($pdo, $chatId);
     
     if ($forceNew && $msgId !== null) {
@@ -316,13 +328,14 @@ function buildSettingsText(PDO $pdo, array $cfg): string {
 function buildStatusText(PDO $pdo, array $cfg): string {
     $state = loadLastState($pdo, $cfg);
     $title = getBaseTitle($cfg);
-    
-    $powerEmoji = match ($state['power_state'] ?? 'UNKNOWN') {
+
+    $resolvedPower = inferPowerState($state, $cfg);
+    $powerEmoji = match ($resolvedPower) {
         'ON' => '✅',
         'OFF' => '❌',
         default => '❓',
     };
-    $powerText = match ($state['power_state'] ?? 'UNKNOWN') {
+    $powerText = match ($resolvedPower) {
         'ON' => 'Є',
         'OFF' => 'Немає',
         default => 'Невідомо',
