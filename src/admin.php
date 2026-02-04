@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * VoltPing - Admin Panel v1.1.0
+ * VoltPing - Admin Panel v1.2.0
  * Повноцінна веб-панель адміністрування
  */
 
@@ -39,6 +39,12 @@ if (!in_array($currentTab, $validTabs)) {
     $currentTab = 'dashboard';
 }
 
+// ==================== HELPER: Get DB Setting ====================
+function getDbSetting(PDO $pdo, string $key, string $default = ''): string {
+    $val = dbGet($pdo, $key);
+    return $val !== null ? $val : $default;
+}
+
 // ==================== NOTIFICATION TEMPLATES ====================
 function getNotificationTemplates(PDO $pdo): array {
     $defaults = [
@@ -49,7 +55,6 @@ function getNotificationTemplates(PDO $pdo): array {
         'voltage_normal' => ['title' => 'Напруга в нормі', 'body' => '✅ Напруга повернулась в норму\n\n{voltage}V', 'enabled' => 1],
     ];
     
-    // Ensure table exists
     $pdo->exec("CREATE TABLE IF NOT EXISTS notification_templates (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
@@ -57,13 +62,11 @@ function getNotificationTemplates(PDO $pdo): array {
         enabled INTEGER DEFAULT 1
     )");
     
-    // Insert defaults if not exists
     $stmt = $pdo->prepare("INSERT OR IGNORE INTO notification_templates (id, title, body, enabled) VALUES (?, ?, ?, ?)");
     foreach ($defaults as $id => $tpl) {
         $stmt->execute([$id, $tpl['title'], $tpl['body'], $tpl['enabled']]);
     }
     
-    // Fetch all
     $result = [];
     $rows = $pdo->query("SELECT * FROM notification_templates")->fetchAll(PDO::FETCH_ASSOC);
     foreach ($rows as $row) {
@@ -245,7 +248,7 @@ if ($isAuthenticated && isset($_GET['api'])) {
         case 'test_notification':
             $input = json_decode(file_get_contents('php://input'), true);
             $templateId = $input['id'] ?? '';
-            $target = $input['target'] ?? 'admin'; // 'admin' or 'all'
+            $target = $input['target'] ?? 'admin';
             
             $templates = getNotificationTemplates($pdo);
             if (!isset($templates[$templateId])) {
@@ -284,6 +287,29 @@ if ($isAuthenticated && isset($_GET['api'])) {
             }
             
             echo json_encode(['ok' => true, 'sent' => $sent]);
+            exit;
+            
+        case 'parse_schedule':
+            require_once __DIR__ . '/schedule_parser.php';
+            
+            $channelId = getDbSetting($pdo, 'schedule_channel_id', '');
+            $queue = getDbSetting($pdo, 'schedule_queue', '4.1');
+            
+            if (!$channelId) {
+                echo json_encode(['ok' => false, 'error' => 'Канал не налаштовано']);
+                exit;
+            }
+            
+            $botToken = $config['tg_bot_token'] ?? '';
+            if (!$botToken) {
+                echo json_encode(['ok' => false, 'error' => 'Bot token not configured']);
+                exit;
+            }
+            
+            // Get channel messages via Telegram API
+            $result = parseChannelSchedule($pdo, $botToken, $channelId, $queue);
+            
+            echo json_encode($result, JSON_UNESCAPED_UNICODE);
             exit;
     }
 }
@@ -324,13 +350,10 @@ if ($isAuthenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['a
                 $sent = 0;
                 
                 if ($target === 'admins') {
-                    // Only admins
                     $subscribers = $pdo->query("SELECT chat_id FROM bot_subscribers WHERE is_admin = 1")->fetchAll(PDO::FETCH_COLUMN);
                 } elseif ($target === 'all') {
-                    // All subscribers
                     $subscribers = $pdo->query("SELECT chat_id FROM bot_subscribers")->fetchAll(PDO::FETCH_COLUMN);
                 } else {
-                    // Only active
                     $subscribers = $pdo->query("SELECT chat_id FROM bot_subscribers WHERE is_active = 1")->fetchAll(PDO::FETCH_COLUMN);
                 }
                 
@@ -379,11 +402,11 @@ if ($isAuthenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['a
             
         case 'save_schedule_channel':
             $channelId = trim($_POST['channel_id'] ?? '');
-            $queue = (int)($_POST['queue'] ?? 1);
+            $queue = trim($_POST['queue'] ?? '4.1');
             $enabled = isset($_POST['enabled']) ? '1' : '0';
             
             dbSet($pdo, 'schedule_channel_id', $channelId);
-            dbSet($pdo, 'schedule_queue', (string)$queue);
+            dbSet($pdo, 'schedule_queue', $queue);
             dbSet($pdo, 'schedule_parse_enabled', $enabled);
             
             $flash = '✅ Налаштування парсингу збережено';
@@ -391,7 +414,6 @@ if ($isAuthenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['a
             break;
     }
     
-    // Redirect to avoid form resubmission
     if ($flash) {
         $_SESSION['flash'] = $flash;
         $_SESSION['flash_type'] = $flashType;
@@ -423,7 +445,20 @@ $events = $pdo->query("SELECT * FROM events ORDER BY ts DESC LIMIT 20")->fetchAl
 $apiStats = getApiStats($pdo);
 $notificationTemplates = getNotificationTemplates($pdo);
 
+// Read schedule settings from DB
+$scheduleChannelId = getDbSetting($pdo, 'schedule_channel_id', '');
+$scheduleQueue = getDbSetting($pdo, 'schedule_queue', '4.1');
+$scheduleParseEnabled = getDbSetting($pdo, 'schedule_parse_enabled', '0') === '1';
+
 $projectName = $config['project_name'] ?? 'VoltPing';
+
+// Calculate API limits
+$checkInterval = (int)($config['check_interval_seconds'] ?? 60);
+$requestsPerDay = $checkInterval > 0 ? (86400 / $checkInterval) : 1440;
+$requestsPerMonth = $requestsPerDay * 30;
+$apiLimit = 30000;
+$limitPercent = min(100, round($requestsPerMonth / $apiLimit * 100));
+$limitOk = $requestsPerMonth <= $apiLimit;
 
 // ==================== HTML OUTPUT ====================
 ?>
@@ -659,6 +694,29 @@ $projectName = $config['project_name'] ?? 'VoltPing';
         
         .template-title { font-weight: 600; }
         
+        .hint {
+            background: rgba(59, 130, 246, 0.1);
+            border-left: 3px solid var(--accent);
+            padding: 0.75rem 1rem;
+            margin: 0.5rem 0;
+            font-size: 0.9rem;
+            color: var(--muted);
+        }
+        
+        .progress-bar {
+            height: 8px;
+            background: var(--border);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        
+        .progress-bar .fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        
         /* Login */
         .login-container {
             min-height: 100vh;
@@ -789,6 +847,20 @@ $projectName = $config['project_name'] ?? 'VoltPing';
                     🔄 Примусова перевірка
                 </button>
             </form>
+            
+            <div class="card-title" style="margin-top: 1rem;">📊 API ліміти</div>
+            <p style="font-size: 0.9rem;">
+                Інтервал: <strong><?= $checkInterval ?> сек</strong><br>
+                Запитів/день: <strong><?= number_format($requestsPerDay, 0, ',', ' ') ?></strong><br>
+                Запитів/місяць: <strong><?= number_format($requestsPerMonth, 0, ',', ' ') ?></strong>
+            </p>
+            <div class="progress-bar">
+                <div class="fill" style="width: <?= $limitPercent ?>%; background: <?= $limitOk ? 'var(--success)' : 'var(--danger)' ?>;"></div>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem;">
+                <?= $limitPercent ?>% від ліміту (30 000)
+                <?= $limitOk ? '✅' : '⚠️ Перевищення!' ?>
+            </p>
         </div>
     </div>
     
@@ -836,7 +908,7 @@ $projectName = $config['project_name'] ?? 'VoltPing';
                             <td>
                                 <form method="POST" style="display: inline;">
                                     <input type="hidden" name="action" value="delete_schedule">
-                                    <input type="hidden" name="id" value="<?= $s['id'] ?>">
+                                    <input type="hidden" name="id" value="<?= (int)$s['id'] ?>">
                                     <button type="submit" class="btn btn-danger btn-sm">✕</button>
                                 </form>
                             </td>
@@ -856,23 +928,40 @@ $projectName = $config['project_name'] ?? 'VoltPing';
                 <div class="form-group">
                     <label>Telegram канал (username)</label>
                     <input type="text" name="channel_id" placeholder="electronewsboryspil" 
-                           value="<?= h($config['schedule_channel_id'] ?? '') ?>">
+                           value="<?= h($scheduleChannelId) ?>">
                 </div>
                 <div class="form-group">
-                    <label>Група/черга</label>
-                    <input type="number" name="queue" min="1" max="6" 
-                           value="<?= (int)($config['schedule_queue'] ?? 1) ?>">
+                    <label>Група (наприклад: 4.1, 3.2)</label>
+                    <input type="text" name="queue" placeholder="4.1" 
+                           value="<?= h($scheduleQueue) ?>">
                 </div>
                 <div class="form-group">
                     <label style="visibility: hidden;">_</label>
                     <label style="display: flex; align-items: center; gap: 0.5rem; visibility: visible;">
-                        <input type="checkbox" name="enabled" <?= ($config['schedule_parse_enabled'] ?? false) ? 'checked' : '' ?>>
-                        Увімкнути автопарсинг
+                        <input type="checkbox" name="enabled" <?= $scheduleParseEnabled ? 'checked' : '' ?>>
+                        Автопарсинг
                     </label>
                 </div>
             </div>
-            <button type="submit" class="btn btn-primary">Зберегти</button>
+            <div style="display: flex; gap: 0.5rem;">
+                <button type="submit" class="btn btn-primary">💾 Зберегти</button>
+                <button type="button" class="btn btn-outline" onclick="parseScheduleNow()">🔄 Спарсити зараз</button>
+            </div>
         </form>
+        
+        <div id="parseResult" style="margin-top: 1rem; display: none;">
+            <div style="background: var(--bg); border-radius: 8px; padding: 1rem; font-family: monospace; font-size: 0.85rem;">
+                <pre id="parseResultContent"></pre>
+            </div>
+        </div>
+        
+        <div class="hint" style="margin-top: 1rem;">
+            <strong>Підтримувані формати:</strong><br>
+            • Групи 4.1 і 4.2<br>
+            • ⚫️08:00 відкл. (6.1)<br>
+            • 🟢10:00 увімк.<br>
+            Парсер читає останні 20 повідомлень і шукає вашу групу.
+        </div>
     </div>
     
     <?php elseif ($currentTab === 'messages'): ?>
@@ -911,12 +1000,6 @@ $projectName = $config['project_name'] ?? 'VoltPing';
                     <li><code>&lt;code&gt;код&lt;/code&gt;</code></li>
                     <li><code>&lt;a href="..."&gt;посилання&lt;/a&gt;</code></li>
                 </ul>
-                <p><strong>Приклад:</strong></p>
-                <div style="background: var(--bg); padding: 0.75rem; border-radius: 6px; margin-top: 0.5rem;">
-                    🔔 <b>Увага!</b><br>
-                    Планові роботи <i>05.02.2026</i><br>
-                    <a href="https://example.com">Детальніше</a>
-                </div>
             </div>
         </div>
     </div>
@@ -985,9 +1068,9 @@ $projectName = $config['project_name'] ?? 'VoltPing';
             <tbody>
             <?php foreach ($subscribers as $s): ?>
                 <tr>
-                    <td><?= h($s['first_name'] ?? '') ?></td>
-                    <td><?= $s['username'] ? '@' . h($s['username']) : '—' ?></td>
-                    <td><code><?= h($s['chat_id']) ?></code></td>
+                    <td><?= h((string)($s['first_name'] ?? '')) ?></td>
+                    <td><?= $s['username'] ? '@' . h((string)$s['username']) : '—' ?></td>
+                    <td><code><?= (int)$s['chat_id'] ?></code></td>
                     <td>
                         <?php if ($s['is_active']): ?>
                             <span class="badge badge-success">Активний</span>
@@ -1005,7 +1088,7 @@ $projectName = $config['project_name'] ?? 'VoltPing';
                     <td>
                         <form method="POST" style="display: inline;">
                             <input type="hidden" name="action" value="toggle_admin">
-                            <input type="hidden" name="chat_id" value="<?= h($s['chat_id']) ?>">
+                            <input type="hidden" name="chat_id" value="<?= (int)$s['chat_id'] ?>">
                             <button type="submit" class="btn btn-sm <?= ($s['is_admin'] ?? false) ? 'btn-danger' : 'btn-outline' ?>" 
                                     title="<?= ($s['is_admin'] ?? false) ? 'Зняти права адміна' : 'Призначити адміном' ?>">
                                 <?= ($s['is_admin'] ?? false) ? '👑 ✕' : '👑' ?>
@@ -1060,10 +1143,18 @@ $projectName = $config['project_name'] ?? 'VoltPing';
             <div class="form-group">
                 <label>Інтервал перевірки (секунди)</label>
                 <input type="number" id="setting_check_interval" value="<?= $config['check_interval_seconds'] ?? 60 ?>">
+                <div class="hint">
+                    Як часто опитувати пристрій. При 60 сек = 1440 запитів/день.<br>
+                    Ліміт Tuya: 30 000 запитів/місяць.
+                </div>
             </div>
             <div class="form-group">
-                <label>Повторні сповіщення (хвилини)</label>
+                <label>Повторні сповіщення про напругу (хвилини)</label>
                 <input type="number" id="setting_notify_repeat" value="<?= $config['notify_repeat_minutes'] ?? 60 ?>">
+                <div class="hint">
+                    Якщо напруга залишається критичною/низькою, повторне сповіщення
+                    буде надіслано через цей інтервал. 0 = вимкнено.
+                </div>
             </div>
         </div>
         
@@ -1072,9 +1163,9 @@ $projectName = $config['project_name'] ?? 'VoltPing';
             <div class="form-group">
                 <label>Режим</label>
                 <select id="setting_tuya_mode">
-                    <option value="cloud" <?= ($config['tuya_mode'] ?? 'cloud') === 'cloud' ? 'selected' : '' ?>>Cloud</option>
-                    <option value="local" <?= ($config['tuya_mode'] ?? '') === 'local' ? 'selected' : '' ?>>Local</option>
-                    <option value="hybrid" <?= ($config['tuya_mode'] ?? '') === 'hybrid' ? 'selected' : '' ?>>Hybrid</option>
+                    <option value="cloud" <?= ($config['tuya_mode'] ?? 'cloud') === 'cloud' ? 'selected' : '' ?>>Cloud (через інтернет)</option>
+                    <option value="local" <?= ($config['tuya_mode'] ?? '') === 'local' ? 'selected' : '' ?>>Local (локальна мережа)</option>
+                    <option value="hybrid" <?= ($config['tuya_mode'] ?? '') === 'hybrid' ? 'selected' : '' ?>>Hybrid (спочатку local, потім cloud)</option>
                 </select>
             </div>
         </div>
@@ -1118,7 +1209,6 @@ $projectName = $config['project_name'] ?? 'VoltPing';
 </div>
 
 <script>
-// Check for updates on load
 document.addEventListener('DOMContentLoaded', checkUpdate);
 
 async function checkUpdate() {
@@ -1227,6 +1317,7 @@ async function saveTemplate(id) {
         
         if (data.ok) {
             alert('✅ Шаблон збережено!');
+            location.reload();
         } else {
             alert('❌ Помилка: ' + (data.error || 'Невідома помилка'));
         }
@@ -1258,6 +1349,34 @@ async function testNotification(id, target) {
         }
     } catch (e) {
         alert('❌ Помилка: ' + e.message);
+    }
+}
+
+async function parseScheduleNow() {
+    const result = document.getElementById('parseResult');
+    const content = document.getElementById('parseResultContent');
+    
+    result.style.display = 'block';
+    content.textContent = '🔄 Парсинг графіку...\n';
+    
+    try {
+        const res = await fetch('?api=parse_schedule', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.ok) {
+            content.textContent = `✅ Знайдено записів: ${data.found}\n`;
+            content.textContent += `📅 Дата: ${data.date || '?'}\n`;
+            if (data.schedules && data.schedules.length > 0) {
+                content.textContent += `\nГрафік:\n`;
+                data.schedules.forEach(s => {
+                    content.textContent += `  ${s.time_start} - ${s.time_end}\n`;
+                });
+            }
+        } else {
+            content.textContent = `❌ Помилка: ${data.error || 'Невідома помилка'}\n`;
+        }
+    } catch (e) {
+        content.textContent = `❌ Помилка: ${e.message}\n`;
     }
 }
 </script>
