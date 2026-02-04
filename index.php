@@ -74,7 +74,7 @@ if (isset($_GET['api'])) {
 function getWeekStats(PDO $pdo): array {
     $weekAgo = time() - (7 * 24 * 3600);
     
-    $stmt = $pdo->prepare("SELECT event_type, ts FROM events WHERE ts >= :weekAgo ORDER BY ts ASC");
+    $stmt = $pdo->prepare("SELECT type, ts FROM events WHERE ts >= :weekAgo ORDER BY ts ASC");
     $stmt->execute([':weekAgo' => $weekAgo]);
     $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
@@ -90,7 +90,7 @@ function getWeekStats(PDO $pdo): array {
         } else {
             $offSeconds += $duration;
         }
-        $prevState = $e['event_type'];
+        $prevState = $e['type'];
         $prevTs = (int)$e['ts'];
     }
     

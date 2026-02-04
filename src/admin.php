@@ -386,7 +386,7 @@ function getSubscriberStats(PDO $pdo): array {
 }
 
 $state = loadLastState($pdo, $config);
-$subscribers = $pdo->query("SELECT * FROM bot_subscribers ORDER BY started_ts DESC")->fetchAll(PDO::FETCH_ASSOC);
+$subscribers = $pdo->query("SELECT * FROM bot_subscribers ORDER BY chat_id DESC")->fetchAll(PDO::FETCH_ASSOC);
 $subscriberStats = getSubscriberStats($pdo);
 $schedules = getUpcomingSchedule($pdo, 14);
 $events = $pdo->query("SELECT * FROM events ORDER BY ts DESC LIMIT 20")->fetchAll(PDO::FETCH_ASSOC);
