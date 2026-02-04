@@ -133,6 +133,66 @@ function getActiveBotSubscribers(PDO $pdo): array {
     return array_values(array_unique($ids));
 }
 
+function checkScheduleNotifications(PDO $pdo, array $cfg, int $now): void {
+    // Minimal implementation: notify shortly before planned OFF/ON intervals based on `schedule` table.
+    // Safe-by-default: if no bot token or no subscribers, or no schedule rows, do nothing.
+    if (($cfg['tg_token'] ?? '') === '') return;
+
+    $chatIds = getActiveBotSubscribers($pdo);
+    if ($chatIds === []) return;
+
+    $date = date('Y-m-d', $now);
+    try {
+        $st = $pdo->prepare("SELECT id, time_start, time_end, note FROM schedule WHERE date = ? ORDER BY time_start ASC");
+        $st->execute([$date]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+    } catch (Throwable $e) {
+        return;
+    }
+
+    if ($rows === []) return;
+
+    $minutesBefore = (int)dbGet($pdo, 'schedule_notify_before_minutes', '10');
+    if ($minutesBefore < 0) $minutesBefore = 0;
+    if ($minutesBefore > 120) $minutesBefore = 120;
+
+    foreach ($rows as $row) {
+        $id = (int)($row['id'] ?? 0);
+        $start = (string)($row['time_start'] ?? '');
+        $end = (string)($row['time_end'] ?? '');
+        if ($id <= 0 || $start === '' || $end === '') continue;
+
+        $startTs = strtotime($date . ' ' . $start . ':00');
+        $endTs = strtotime($date . ' ' . $end . ':00');
+        if ($startTs === false || $endTs === false) continue;
+
+        $keyStart = "schedule_notified_start_{$date}_{$id}";
+        $keyEnd = "schedule_notified_end_{$date}_{$id}";
+
+        // Notify before outage start
+        if ($minutesBefore > 0 && $now >= ($startTs - $minutesBefore * 60) && $now < $startTs) {
+            if (dbGet($pdo, $keyStart, '0') !== '1') {
+                $mins = (int)ceil(($startTs - $now) / 60);
+                $title = getBaseTitle($cfg);
+                $msg = "📅 {$title}\n\n⚫️ Планове відключення через {$mins} хв\n🕒 {$start}–{$end}";
+                sendMessageToChats($pdo, $cfg, $chatIds, $msg);
+                dbSet($pdo, $keyStart, '1');
+            }
+        }
+
+        // Notify before power restore
+        if ($minutesBefore > 0 && $now >= ($endTs - $minutesBefore * 60) && $now < $endTs) {
+            if (dbGet($pdo, $keyEnd, '0') !== '1') {
+                $mins = (int)ceil(($endTs - $now) / 60);
+                $title = getBaseTitle($cfg);
+                $msg = "📅 {$title}\n\n🟢 Орієнтовне увімкнення через {$mins} хв\n🕒 {$start}–{$end}";
+                sendMessageToChats($pdo, $cfg, $chatIds, $msg);
+                dbSet($pdo, $keyEnd, '1');
+            }
+        }
+    }
+}
+
 function voltageAdvice(string $vState): string {
     $liftWarn = "🚫 Під час падіння напруги не користуйтеся ліфтом.";
     
@@ -424,7 +484,9 @@ if ($voltageChanged || $needRepeat) {
 
 // ==================== SCHEDULE NOTIFICATIONS ====================
 
-$scheduleEnabled = $config['schedule_parse_enabled'] ?? false;
+// Prefer DB toggle (admin panel), fallback to env config.
+$scheduleEnabled = (dbGet($pdo, 'schedule_parse_enabled', null) ?? '') === '1'
+    || (bool)($config['schedule_parse_enabled'] ?? false);
 if ($scheduleEnabled) {
     checkScheduleNotifications($pdo, $config, $now);
 }

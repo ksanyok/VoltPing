@@ -86,8 +86,8 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
         $stmt->execute([$scheduleDate, $schedule['start'], $schedule['end']]);
         
         if (!$stmt->fetch()) {
-            $stmt = $pdo->prepare("INSERT INTO schedule (date, time_start, time_end, note, source) VALUES (?, ?, ?, ?, 'parsed')");
-            $stmt->execute([$scheduleDate, $schedule['start'], $schedule['end'], "Група {$targetQueue}"]);
+            $stmt = $pdo->prepare("INSERT INTO schedule (date, time_start, time_end, note, created_ts) VALUES (?, ?, ?, ?, ?)");
+            $stmt->execute([$scheduleDate, $schedule['start'], $schedule['end'], "Група {$targetQueue}", time()]);
             $saved++;
         }
     }
