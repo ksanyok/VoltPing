@@ -341,6 +341,106 @@ if ($isAuthenticated && isset($_GET['api'])) {
             echo json_encode($result, JSON_UNESCAPED_UNICODE);
             exit;
             
+        case 'test_bot':
+            $botToken = $config['tg_token'] ?? '';
+            if (!$botToken) {
+                echo json_encode(['ok' => false, 'error' => 'Токен бота не налаштовано']);
+                exit;
+            }
+            
+            $url = "https://api.telegram.org/bot{$botToken}/getMe";
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 10,
+            ]);
+            $response = curl_exec($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            
+            if ($httpCode !== 200) {
+                echo json_encode(['ok' => false, 'error' => 'HTTP ' . $httpCode]);
+                exit;
+            }
+            
+            $data = json_decode($response, true);
+            if (!$data || !$data['ok']) {
+                echo json_encode(['ok' => false, 'error' => $data['description'] ?? 'Невідома помилка']);
+                exit;
+            }
+            
+            echo json_encode([
+                'ok' => true,
+                'id' => $data['result']['id'],
+                'username' => $data['result']['username'] ?? '',
+                'first_name' => $data['result']['first_name'] ?? '',
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+            
+        case 'check_webhook':
+            $botToken = $config['tg_token'] ?? '';
+            if (!$botToken) {
+                echo json_encode(['ok' => false, 'error' => 'Токен бота не налаштовано']);
+                exit;
+            }
+            
+            $url = "https://api.telegram.org/bot{$botToken}/getWebhookInfo";
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 10,
+            ]);
+            $response = curl_exec($ch);
+            curl_close($ch);
+            
+            $data = json_decode($response, true);
+            if (!$data || !$data['ok']) {
+                echo json_encode(['ok' => false, 'error' => $data['description'] ?? 'Невідома помилка']);
+                exit;
+            }
+            
+            echo json_encode([
+                'ok' => true,
+                'webhook' => $data['result'],
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+            
+        case 'setup_webhook':
+            $botToken = $config['tg_token'] ?? '';
+            if (!$botToken) {
+                echo json_encode(['ok' => false, 'error' => 'Токен бота не налаштовано']);
+                exit;
+            }
+            
+            // Determine the webhook URL
+            $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $host = $_SERVER['HTTP_HOST'];
+            $scriptPath = dirname($_SERVER['SCRIPT_NAME']);
+            $webhookUrl = "{$protocol}://{$host}{$scriptPath}/bot.php";
+            
+            $url = "https://api.telegram.org/bot{$botToken}/setWebhook";
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => http_build_query(['url' => $webhookUrl]),
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT => 10,
+            ]);
+            $response = curl_exec($ch);
+            curl_close($ch);
+            
+            $data = json_decode($response, true);
+            if (!$data || !$data['ok']) {
+                echo json_encode(['ok' => false, 'error' => $data['description'] ?? 'Невідома помилка']);
+                exit;
+            }
+            
+            echo json_encode([
+                'ok' => true,
+                'webhook_url' => $webhookUrl,
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
+            
         case 'get_events':
             $page = max(1, (int)($_GET['page'] ?? 1));
             $perPage = 50;
@@ -1415,6 +1515,41 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
                 </select>
             </div>
         </div>
+        
+        <div class="card">
+            <div class="card-title">🤖 Telegram Bot</div>
+            <?php
+            $botTokenValue = $config['tg_token'] ?? '';
+            $botTokenMasked = $botTokenValue ? substr($botTokenValue, 0, 10) . '...' . substr($botTokenValue, -5) : '';
+            ?>
+            <div class="form-group">
+                <label>Токен бота</label>
+                <input type="text" id="setting_bot_token" value="<?= h($botTokenMasked) ?>" placeholder="123456789:ABC...XYZ">
+                <div class="hint">Отримати токен можна у @BotFather</div>
+            </div>
+            <div class="form-group">
+                <label>Username бота</label>
+                <input type="text" id="setting_bot_username" value="<?= h($config['tg_bot_username'] ?? '') ?>" placeholder="@mybot">
+            </div>
+            <div class="form-group">
+                <label>Admin Chat ID</label>
+                <input type="text" id="setting_admin_id" value="<?= h($config['tg_admin_id'] ?? '') ?>" placeholder="123456789">
+                <div class="hint">Ваш Telegram ID для отримання адмін-сповіщень</div>
+            </div>
+            
+            <div id="botStatus" style="margin: 1rem 0; padding: 1rem; background: var(--bg); border-radius: 8px; display: none;">
+                <div id="botStatusContent"></div>
+            </div>
+            
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button type="button" class="btn btn-outline" onclick="testBotConnection()">🔍 Перевірити бота</button>
+                <button type="button" class="btn btn-outline" onclick="checkWebhook()">🔗 Перевірити webhook</button>
+                <button type="button" class="btn btn-primary" onclick="setupWebhook()">⚙️ Налаштувати webhook</button>
+                <?php if ($botLink): ?>
+                <a href="<?= h($botLink) ?>" target="_blank" class="btn btn-success">🤖 Відкрити бота</a>
+                <?php endif; ?>
+            </div>
+        </div>
     </div>
     
     <div style="margin-top: 1rem;">
@@ -1743,6 +1878,97 @@ async function parseScheduleNow() {
         }
     } catch (e) {
         content.textContent = `❌ Помилка: ${e.message}\n`;
+    }
+}
+
+async function testBotConnection() {
+    const statusDiv = document.getElementById('botStatus');
+    const statusContent = document.getElementById('botStatusContent');
+    
+    statusDiv.style.display = 'block';
+    statusContent.innerHTML = '🔄 Перевірка підключення до бота...';
+    
+    try {
+        const res = await fetch('?api=test_bot', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.ok) {
+            statusContent.innerHTML = `
+                <div style="color: var(--success);">✅ Бот працює!</div>
+                <div style="margin-top: 0.5rem;">
+                    <strong>Username:</strong> @${data.username}<br>
+                    <strong>Ім'я:</strong> ${data.first_name}<br>
+                    <strong>ID:</strong> ${data.id}
+                </div>
+            `;
+        } else {
+            statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${data.error}</div>`;
+        }
+    } catch (e) {
+        statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${e.message}</div>`;
+    }
+}
+
+async function checkWebhook() {
+    const statusDiv = document.getElementById('botStatus');
+    const statusContent = document.getElementById('botStatusContent');
+    
+    statusDiv.style.display = 'block';
+    statusContent.innerHTML = '🔄 Перевірка webhook...';
+    
+    try {
+        const res = await fetch('?api=check_webhook', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.ok) {
+            let webhookInfo = data.webhook;
+            let html = '';
+            
+            if (webhookInfo.url) {
+                html = `
+                    <div style="color: var(--success);">✅ Webhook налаштовано</div>
+                    <div style="margin-top: 0.5rem;">
+                        <strong>URL:</strong> <code style="word-break: break-all;">${webhookInfo.url}</code><br>
+                        <strong>Pending updates:</strong> ${webhookInfo.pending_update_count || 0}<br>
+                        ${webhookInfo.last_error_message ? `<strong>Остання помилка:</strong> <span style="color: var(--warning);">${webhookInfo.last_error_message}</span>` : ''}
+                    </div>
+                `;
+            } else {
+                html = `<div style="color: var(--warning);">⚠️ Webhook не налаштовано</div>`;
+            }
+            
+            statusContent.innerHTML = html;
+        } else {
+            statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${data.error}</div>`;
+        }
+    } catch (e) {
+        statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${e.message}</div>`;
+    }
+}
+
+async function setupWebhook() {
+    const statusDiv = document.getElementById('botStatus');
+    const statusContent = document.getElementById('botStatusContent');
+    
+    statusDiv.style.display = 'block';
+    statusContent.innerHTML = '🔄 Налаштування webhook...';
+    
+    try {
+        const res = await fetch('?api=setup_webhook', { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.ok) {
+            statusContent.innerHTML = `
+                <div style="color: var(--success);">✅ Webhook успішно налаштовано!</div>
+                <div style="margin-top: 0.5rem;">
+                    <strong>URL:</strong> <code style="word-break: break-all;">${data.webhook_url}</code>
+                </div>
+            `;
+        } else {
+            statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${data.error}</div>`;
+        }
+    } catch (e) {
+        statusContent.innerHTML = `<div style="color: var(--danger);">❌ Помилка: ${e.message}</div>`;
     }
 }
 </script>

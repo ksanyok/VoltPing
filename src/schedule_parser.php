@@ -2,21 +2,19 @@
 declare(strict_types=1);
 
 /**
- * VoltPing - Schedule Parser v1.2.0
+ * VoltPing - Schedule Parser v1.3.1
  * Парсер графіків відключень з Telegram каналів
  * 
- * Підтримувані формати:
+ * Підтримуваний формат (ДТЕК/ElectroNews):
  * 
- * === Формат ДТЕК ===
  * Групи 4.1 і 4.2
- * ⚫️08:00 відкл. (4.1)
- * 🟢10:00 увімк.
+ * 🟢00:00 увімк. (4.2)
+ * ⚫️01:00 відкл. (4.2)
+ * 🟢03:00 увімк.
+ * ⚫️06:30 відкл.
+ * 🟢13:30 увімк.
  * ⚫️17:00 відкл.
  * 🟢24:00 увімк.
- * 
- * === Формат з чергами ===
- * 🔴 Черга 1: 00:00-06:00, 12:00-18:00
- * 🟡 Черга 2: 06:00-12:00
  */
 
 /**
@@ -26,22 +24,30 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
     // Normalize channel ID
     $channelId = ltrim($channelId, '@');
     
-    // Get channel messages using Telegram API
-    // We need to use getUpdates or forward messages to bot
-    // For public channels, we can use web scraping or t.me API
-    
-    $messages = getChannelMessages($botToken, $channelId, 20);
+    // Get channel messages
+    $messages = getChannelMessages($channelId, 30);
     
     if (empty($messages)) {
-        return ['ok' => false, 'error' => 'Не вдалося отримати повідомлення з каналу'];
+        return ['ok' => false, 'error' => 'Не вдалося отримати повідомлення з каналу', 'debug' => 'No messages found'];
     }
     
     $foundSchedules = [];
     $date = null;
+    $debugInfo = [];
     
     foreach ($messages as $msg) {
         $text = $msg['text'] ?? '';
         if (empty($text)) continue;
+        
+        // Check if this message contains our group
+        $targetMain = explode('.', $targetQueue)[0];
+        $groupPattern = '/Групи\s+' . preg_quote($targetMain, '/') . '\.\d/ui';
+        
+        if (!preg_match($groupPattern, $text)) {
+            continue;
+        }
+        
+        $debugInfo[] = "Found message with group {$targetMain}";
         
         // Extract date from message
         $msgDate = extractDateFromText($text);
@@ -53,16 +59,21 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
         $schedules = parseScheduleText($text, $targetQueue);
         
         if (!empty($schedules)) {
-            $foundSchedules = array_merge($foundSchedules, $schedules);
+            $foundSchedules = $schedules;
             if (!$date) {
-                $date = date('Y-m-d'); // Default to today
+                $date = date('Y-m-d');
             }
-            break; // Found schedules, stop searching
+            break;
         }
     }
     
     if (empty($foundSchedules)) {
-        return ['ok' => false, 'error' => "Графік для групи {$targetQueue} не знайдено"];
+        return [
+            'ok' => false, 
+            'error' => "Графік для групи {$targetQueue} не знайдено",
+            'debug' => $debugInfo,
+            'messages_count' => count($messages),
+        ];
     }
     
     // Save to database
@@ -91,42 +102,42 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
 }
 
 /**
- * Get messages from Telegram channel
+ * Get messages from Telegram channel using t.me/s/ (public channels)
  */
-function getChannelMessages(string $botToken, string $channelId, int $limit = 20): array {
-    // Try to get messages using Bot API (only works if bot is admin in channel)
-    // If not, try to use t.me/s/{channel} (public channels only)
-    
-    $messages = [];
-    
-    // Method 1: Try t.me/s/ for public channels
+function getChannelMessages(string $channelId, int $limit = 30): array {
     $url = "https://t.me/s/{$channelId}";
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT => 10,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_SSL_VERIFYPEER => false,
     ]);
     $html = curl_exec($ch);
     $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
     
-    if ($code === 200 && $html) {
-        // Parse HTML to extract messages
-        preg_match_all('/<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)<\/div>/s', $html, $matches);
-        
-        if (!empty($matches[1])) {
-            foreach (array_slice($matches[1], 0, $limit) as $msgHtml) {
-                // Clean HTML
-                $text = strip_tags($msgHtml);
-                $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
-                $text = preg_replace('/\s+/', ' ', $text);
-                $text = trim($text);
-                
-                if ($text) {
-                    $messages[] = ['text' => $text];
-                }
+    $messages = [];
+    
+    if ($code !== 200 || !$html) {
+        return $messages;
+    }
+    
+    // Parse HTML to extract messages
+    // Messages are in: <div class="tgme_widget_message_text js-message_text" dir="auto">...</div>
+    preg_match_all('/<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)<\/div>/s', $html, $matches);
+    
+    if (!empty($matches[1])) {
+        foreach (array_slice($matches[1], 0, $limit) as $msgHtml) {
+            // Clean HTML but preserve line breaks
+            $text = preg_replace('/<br\s*\/?>/i', "\n", $msgHtml);
+            $text = strip_tags($text);
+            $text = html_entity_decode($text, ENT_QUOTES, 'UTF-8');
+            $text = trim($text);
+            
+            if ($text) {
+                $messages[] = ['text' => $text];
             }
         }
     }
@@ -142,12 +153,9 @@ function extractDateFromText(string $text): ?string {
         'січня' => 1, 'лютого' => 2, 'березня' => 3, 'квітня' => 4,
         'травня' => 5, 'червня' => 6, 'липня' => 7, 'серпня' => 8,
         'вересня' => 9, 'жовтня' => 10, 'листопада' => 11, 'грудня' => 12,
-        'января' => 1, 'февраля' => 2, 'марта' => 3, 'апреля' => 4,
-        'мая' => 5, 'июня' => 6, 'июля' => 7, 'августа' => 8,
-        'сентября' => 9, 'октября' => 10, 'ноября' => 11, 'декабря' => 12,
     ];
     
-    // Pattern: "4 лютого" or "05.02.2026"
+    // Pattern: "на 4 лютого" or "4 лютого"
     foreach ($months as $monthName => $monthNum) {
         if (preg_match('/(\d{1,2})\s+' . preg_quote($monthName, '/') . '/ui', $text, $m)) {
             $day = (int)$m[1];
@@ -167,7 +175,7 @@ function extractDateFromText(string $text): ?string {
     
     // Keywords
     $lower = mb_strtolower($text, 'UTF-8');
-    if (str_contains($lower, 'сьогодні') || str_contains($lower, 'сегодня')) {
+    if (str_contains($lower, 'сьогодні') || str_contains($lower, 'на сьогодні')) {
         return date('Y-m-d');
     }
     if (str_contains($lower, 'завтра')) {
@@ -180,145 +188,144 @@ function extractDateFromText(string $text): ?string {
 /**
  * Parse schedule text for specific queue/group
  * 
- * Supports formats:
- * - Групи 4.1 і 4.2 / ⚫️08:00 відкл. (4.1)
- * - Черга 1: 00:00-06:00, 12:00-18:00
+ * Format example:
+ * Групи 4.1 і 4.2
+ * 🟢00:00 увімк. (4.2)
+ * ⚫️01:00 відкл. (4.2)
+ * 🟢03:00 увімк.
+ * ⚫️06:30 відкл.
+ * 🟢13:30 увімк.
+ * ⚫️17:00 відкл.
+ * 🟢24:00 увімк.
  */
 function parseScheduleText(string $text, string $targetQueue): array {
     $schedules = [];
     
     // Normalize target queue (4.1, 4.2, etc.)
     $targetQueue = trim($targetQueue);
-    $targetMain = explode('.', $targetQueue)[0]; // "4" from "4.1"
+    $targetMain = explode('.', $targetQueue)[0];
+    $targetSub = $targetQueue; // Full queue like "4.1"
     
-    // Check if message contains our group
-    $groupPattern = '/групи?\s*' . preg_quote($targetMain, '/') . '\.\d/ui';
-    $queuePattern = '/черг[аи]?\s*' . preg_quote($targetMain, '/') . '/ui';
+    // Find the section for our group
+    $groupPattern = '/Групи\s+' . preg_quote($targetMain, '/') . '\.\d\s+(і|и)\s+' . preg_quote($targetMain, '/') . '\.\d/ui';
     
-    $hasGroup = preg_match($groupPattern, $text) || preg_match($queuePattern, $text);
-    
-    if (!$hasGroup) {
+    if (!preg_match($groupPattern, $text)) {
         return [];
     }
     
-    // Find the section for our group
-    $lines = preg_split('/\n/', $text);
-    $inOurSection = false;
+    // Extract the section for our group
+    // Split by "Групи X.X і X.X" patterns
+    $sections = preg_split('/(?=Групи\s+\d+\.\d)/ui', $text);
+    
+    $ourSection = '';
+    foreach ($sections as $section) {
+        if (preg_match('/^Групи\s+' . preg_quote($targetMain, '/') . '\.\d/ui', $section)) {
+            $ourSection = $section;
+            break;
+        }
+    }
+    
+    if (empty($ourSection)) {
+        return [];
+    }
+    
+    // Parse events from our section
+    // Format: ⚫️HH:MM відкл. or 🟢HH:MM увімк.
+    // With optional (X.X) subgroup marker
+    
     $events = [];
     
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if (empty($line)) continue;
+    // Match all time events
+    preg_match_all('/(⚫️|🟢|⚫|🔴)?\s*(\d{1,2}):(\d{2})\s*(відкл|увімк|откл|вкл)[^\(]*(?:\((\d+\.\d+)\))?/ui', $ourSection, $matches, PREG_SET_ORDER);
+    
+    foreach ($matches as $m) {
+        $emoji = $m[1] ?? '';
+        $hour = (int)$m[2];
+        $minute = (int)$m[3];
+        $action = mb_strtolower($m[4], 'UTF-8');
+        $specificGroup = $m[5] ?? null;
         
-        // Check if this is a group header
-        if (preg_match('/групи?\s*(\d+\.\d+)\s*(і|и|,)\s*(\d+\.\d+)/ui', $line, $m)) {
-            $group1 = $m[1];
-            $group2 = $m[3];
-            $inOurSection = ($group1 === $targetQueue || $group2 === $targetQueue || 
-                            explode('.', $group1)[0] === $targetMain);
+        // Determine if this is "off" event
+        $isOff = str_contains($action, 'відкл') || str_contains($action, 'откл') || $emoji === '⚫️' || $emoji === '⚫' || $emoji === '🔴';
+        
+        // Filter by subgroup if specified
+        if ($specificGroup !== null && $specificGroup !== $targetSub) {
             continue;
         }
         
-        // Check for queue format: "Черга 1: 00:00-06:00"
-        if (preg_match('/черг[аи]?\s*(\d+)\s*:\s*(.+)/ui', $line, $m)) {
-            if ($m[1] === $targetMain) {
-                // Parse time ranges
-                preg_match_all('/(\d{1,2}):?(\d{2})?\s*[-–]\s*(\d{1,2}):?(\d{2})?/', $m[2], $ranges, PREG_SET_ORDER);
-                foreach ($ranges as $r) {
-                    $start = sprintf('%02d:%02d', (int)$r[1], (int)($r[2] ?? 0));
-                    $end = sprintf('%02d:%02d', (int)$r[3], (int)($r[4] ?? 0));
-                    if ($end === '24:00') $end = '23:59';
-                    $schedules[] = ['start' => $start, 'end' => $end, 'type' => 'off'];
-                }
-            }
-            continue;
-        }
+        $time = sprintf('%02d:%02d', $hour, $minute);
+        if ($time === '24:00') $time = '23:59';
         
-        // Parse DTEK format: ⚫️08:00 відкл. (4.1)
-        if ($inOurSection) {
-            // Check if line has specific group marker that is NOT ours
-            if (preg_match('/\((\d+\.\d+)\)/u', $line, $specificGroup)) {
-                if ($specificGroup[1] !== $targetQueue) {
-                    continue; // Skip this line, it's for different subgroup
-                }
+        $events[] = [
+            'time' => $time,
+            'type' => $isOff ? 'off' : 'on',
+        ];
+    }
+    
+    // Sort by time
+    usort($events, fn($a, $b) => strcmp($a['time'], $b['time']));
+    
+    // Convert events to schedules (off periods)
+    $offStart = null;
+    
+    foreach ($events as $event) {
+        if ($event['type'] === 'off') {
+            if ($offStart === null) {
+                $offStart = $event['time'];
             }
-            
-            // Parse time and event
-            if (preg_match('/(⚫️?|🔴|черн|відкл|откл).*?(\d{1,2}):(\d{2})/ui', $line, $m)) {
-                $events[] = [
-                    'time' => sprintf('%02d:%02d', (int)$m[2], (int)$m[3]),
-                    'type' => 'off',
+        } elseif ($event['type'] === 'on') {
+            if ($offStart !== null) {
+                $schedules[] = [
+                    'start' => $offStart,
+                    'end' => $event['time'],
                 ];
-            } elseif (preg_match('/(\d{1,2}):(\d{2}).*(⚫️?|🔴|черн|відкл|откл)/ui', $line, $m)) {
-                $events[] = [
-                    'time' => sprintf('%02d:%02d', (int)$m[1], (int)$m[2]),
-                    'type' => 'off',
-                ];
-            } elseif (preg_match('/(🟢|зелен|увімк|включ).*?(\d{1,2}):(\d{2})/ui', $line, $m)) {
-                $events[] = [
-                    'time' => sprintf('%02d:%02d', (int)$m[2], (int)$m[3]),
-                    'type' => 'on',
-                ];
-            } elseif (preg_match('/(\d{1,2}):(\d{2}).*(🟢|зелен|увімк|включ)/ui', $line, $m)) {
-                $events[] = [
-                    'time' => sprintf('%02d:%02d', (int)$m[1], (int)$m[2]),
-                    'type' => 'on',
-                ];
+                $offStart = null;
             }
         }
     }
     
-    // Convert events to schedules (off periods)
-    if (!empty($events)) {
-        $currentOff = null;
-        
-        foreach ($events as $event) {
-            if ($event['type'] === 'off' && $currentOff === null) {
-                $currentOff = $event['time'];
-            } elseif ($event['type'] === 'on' && $currentOff !== null) {
-                $end = $event['time'];
-                if ($end === '24:00') $end = '23:59';
-                $schedules[] = ['start' => $currentOff, 'end' => $end, 'type' => 'off'];
-                $currentOff = null;
-            }
-        }
-        
-        // If still off at end of day
-        if ($currentOff !== null) {
-            $schedules[] = ['start' => $currentOff, 'end' => '23:59', 'type' => 'off'];
-        }
+    // If still in "off" state at end, close it at 23:59
+    if ($offStart !== null) {
+        $schedules[] = [
+            'start' => $offStart,
+            'end' => '23:59',
+        ];
     }
     
     return $schedules;
 }
 
 /**
- * Parse simple time range format
- * "8-12, 20-24" => [['start' => '08:00', 'end' => '12:00'], ...]
+ * Test parser with sample text
  */
-function parseTimeRanges(string $rangeStr): array {
-    $schedules = [];
+function testParser(): void {
+    $sample = "Прогноз на 4 лютого, середа
+Протягом доби діють ГПВ до 4,5 черг
+Розклад відключень за даними ДТЕК станом на 15:25
+Групи 1.1 і 1.2
+⚫️03:00 відкл.
+🟢10:00 увімк.
+⚫️13:30 відкл.
+🟢20:30 увімк. (1.2)
+⚫️22:00 відкл. (1.2)
+🟢22:00 увімк. (1.1)
+⚫️24:00 відкл. (1.1)
+Групи 4.1 і 4.2
+🟢00:00 увімк. (4.2)
+⚫️01:00 відкл. (4.2)
+🟢03:00 увімк.
+⚫️06:30 відкл.
+🟢11:00 увімк. (4.2)
+⚫️11:30 відкл. (4.2)
+🟢13:30 увімк.
+⚫️17:00 відкл.
+🟢24:00 увімк.";
     
-    preg_match_all('/(\d{1,2}):?(\d{2})?\s*[-–]\s*(\d{1,2}):?(\d{2})?/', $rangeStr, $matches, PREG_SET_ORDER);
+    echo "Testing parser for group 4.1:\n";
+    $result = parseScheduleText($sample, '4.1');
+    print_r($result);
     
-    foreach ($matches as $m) {
-        $startH = (int)$m[1];
-        $startM = isset($m[2]) ? (int)$m[2] : 0;
-        $endH = (int)$m[3];
-        $endM = isset($m[4]) ? (int)$m[4] : 0;
-        
-        // Handle 24:00 as 23:59
-        if ($endH === 24) {
-            $endH = 23;
-            $endM = 59;
-        }
-        
-        $schedules[] = [
-            'start' => sprintf('%02d:%02d', $startH, $startM),
-            'end' => sprintf('%02d:%02d', $endH, $endM),
-            'type' => 'off',
-        ];
-    }
-    
-    return $schedules;
+    echo "\nTesting parser for group 4.2:\n";
+    $result = parseScheduleText($sample, '4.2');
+    print_r($result);
 }
