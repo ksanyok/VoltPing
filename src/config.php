@@ -591,34 +591,64 @@ function isScheduledOutageNow(PDO $pdo): ?array {
 
 function getTodayStats(PDO $pdo): array {
     $dayStart = strtotime('today 00:00:00');
-    
-    $stmt = $pdo->prepare("SELECT type, ts FROM events WHERE ts >= :start ORDER BY ts ASC");
+
+    $stateFromRow = static function(array $row): ?string {
+        $type = strtoupper(trim((string)($row['type'] ?? '')));
+        if ($type === 'POWER') {
+            $s = strtoupper(trim((string)($row['state'] ?? '')));
+            return ($s === 'ON' || $s === 'OFF') ? $s : null;
+        }
+        if ($type === 'LIGHT_ON') return 'ON';
+        if ($type === 'LIGHT_OFF') return 'OFF';
+        return null;
+    };
+
+    // Initial state at day start
+    $prevState = null;
+    try {
+        $st0 = $pdo->prepare("SELECT type, state FROM events WHERE ts < :start AND (type = 'POWER' OR type IN ('LIGHT_ON','LIGHT_OFF')) ORDER BY ts DESC LIMIT 1");
+        $st0->execute([':start' => $dayStart]);
+        $row0 = $st0->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (is_array($row0)) $prevState = $stateFromRow($row0);
+    } catch (Throwable $e) {}
+    if ($prevState !== 'ON' && $prevState !== 'OFF') {
+        try {
+            $prevState = strtoupper(trim((string)dbGet($pdo, 'last_power_state', 'ON')));
+        } catch (Throwable $e) {
+            $prevState = 'ON';
+        }
+    }
+    if ($prevState !== 'ON' && $prevState !== 'OFF') $prevState = 'ON';
+
+    $stmt = $pdo->prepare("SELECT ts, type, state FROM events WHERE ts >= :start AND (type = 'POWER' OR type IN ('LIGHT_ON','LIGHT_OFF')) ORDER BY ts ASC");
     $stmt->execute([':start' => $dayStart]);
-    $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
-    
+    $events = $stmt->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
     $onSeconds = 0;
     $offSeconds = 0;
     $prevTs = $dayStart;
-    $prevState = 'LIGHT_ON';
-    
+
     foreach ($events as $e) {
-        $duration = (int)$e['ts'] - $prevTs;
-        if ($prevState === 'LIGHT_ON') {
-            $onSeconds += $duration;
-        } else {
-            $offSeconds += $duration;
+        $ts = (int)($e['ts'] ?? 0);
+        if ($ts <= 0) continue;
+        $duration = $ts - $prevTs;
+        if ($duration < 0) $duration = 0;
+
+        if ($prevState === 'ON') $onSeconds += $duration;
+        else $offSeconds += $duration;
+
+        $nextState = $stateFromRow($e);
+        if ($nextState === 'ON' || $nextState === 'OFF') {
+            $prevState = $nextState;
         }
-        $prevState = $e['type'];
-        $prevTs = (int)$e['ts'];
+        $prevTs = $ts;
     }
-    
-    $duration = time() - $prevTs;
-    if ($prevState === 'LIGHT_ON') {
-        $onSeconds += $duration;
-    } else {
-        $offSeconds += $duration;
-    }
-    
+
+    $tail = time() - $prevTs;
+    if ($tail < 0) $tail = 0;
+    if ($prevState === 'ON') $onSeconds += $tail;
+    else $offSeconds += $tail;
+
     return ['on' => $onSeconds, 'off' => $offSeconds];
 }
 

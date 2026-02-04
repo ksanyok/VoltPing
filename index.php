@@ -31,8 +31,8 @@ if (isset($_GET['api'])) {
                 'power' => $state['power_state'] ?? 'UNKNOWN',
                 'voltage' => $state['voltage'] ?? null,
                 'voltage_state' => $state['voltage_state'] ?? 'UNKNOWN',
-                'since' => $state['state_since_ts'] ?? null,
-                'last_poll' => $state['last_poll_ts'] ?? null,
+                'since' => $state['power_ts'] ?? null,
+                'last_poll' => $state['check_ts'] ?? null,
                 'scheduled' => $schedule ? [
                     'start' => $schedule['time_start'],
                     'end' => $schedule['time_end'],
@@ -74,32 +74,58 @@ if (isset($_GET['api'])) {
 function getWeekStats(PDO $pdo): array {
     $weekAgo = time() - (7 * 24 * 3600);
     
-    $stmt = $pdo->prepare("SELECT type, ts FROM events WHERE ts >= :weekAgo ORDER BY ts ASC");
+    $stateFromRow = static function(array $row): ?string {
+        $type = strtoupper(trim((string)($row['type'] ?? '')));
+        if ($type === 'POWER') {
+            $s = strtoupper(trim((string)($row['state'] ?? '')));
+            return ($s === 'ON' || $s === 'OFF') ? $s : null;
+        }
+        if ($type === 'LIGHT_ON') return 'ON';
+        if ($type === 'LIGHT_OFF') return 'OFF';
+        return null;
+    };
+
+    // Initial state at week start
+    $prevState = null;
+    try {
+        $st0 = $pdo->prepare("SELECT type, state FROM events WHERE ts < :start AND (type = 'POWER' OR type IN ('LIGHT_ON','LIGHT_OFF')) ORDER BY ts DESC LIMIT 1");
+        $st0->execute([':start' => $weekAgo]);
+        $row0 = $st0->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (is_array($row0)) $prevState = $stateFromRow($row0);
+    } catch (Throwable $e) {}
+    if ($prevState !== 'ON' && $prevState !== 'OFF') {
+        $prevState = strtoupper(trim((string)dbGet($pdo, 'last_power_state', 'ON')));
+    }
+    if ($prevState !== 'ON' && $prevState !== 'OFF') $prevState = 'ON';
+
+    $stmt = $pdo->prepare("SELECT ts, type, state FROM events WHERE ts >= :weekAgo AND (type = 'POWER' OR type IN ('LIGHT_ON','LIGHT_OFF')) ORDER BY ts ASC");
     $stmt->execute([':weekAgo' => $weekAgo]);
     $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
     
     $onSeconds = 0;
     $offSeconds = 0;
     $prevTs = $weekAgo;
-    $prevState = 'LIGHT_ON';
     
     foreach ($events as $e) {
-        $duration = (int)$e['ts'] - $prevTs;
-        if ($prevState === 'LIGHT_ON') {
-            $onSeconds += $duration;
-        } else {
-            $offSeconds += $duration;
+        $ts = (int)($e['ts'] ?? 0);
+        if ($ts <= 0) continue;
+        $duration = $ts - $prevTs;
+        if ($duration < 0) $duration = 0;
+
+        if ($prevState === 'ON') $onSeconds += $duration;
+        else $offSeconds += $duration;
+
+        $nextState = $stateFromRow($e);
+        if ($nextState === 'ON' || $nextState === 'OFF') {
+            $prevState = $nextState;
         }
-        $prevState = $e['type'];
-        $prevTs = (int)$e['ts'];
+        $prevTs = $ts;
     }
     
     $duration = time() - $prevTs;
-    if ($prevState === 'LIGHT_ON') {
-        $onSeconds += $duration;
-    } else {
-        $offSeconds += $duration;
-    }
+    if ($duration < 0) $duration = 0;
+    if ($prevState === 'ON') $onSeconds += $duration;
+    else $offSeconds += $duration;
     
     $total = $onSeconds + $offSeconds;
     
@@ -139,10 +165,18 @@ $state = loadLastState($pdo, $config);
 $powerState = $state['power_state'] ?? 'UNKNOWN';
 $voltage = $state['voltage'] ?? null;
 $voltageState = $state['voltage_state'] ?? 'NORMAL';
-$lastPollTs = $state['last_poll_ts'] ?? 0;
-$stateSinceTs = $state['state_since_ts'] ?? time();
 
-$isPowerOn = $powerState === 'LIGHT_ON';
+$lastPollTs = (int)($state['check_ts'] ?? 0);
+$stateSinceTs = (int)($state['power_ts'] ?? time());
+
+$threshold = (float)($config['voltage_on_threshold'] ?? 50.0);
+$resolvedPower = $powerState;
+if ($resolvedPower !== 'ON' && $resolvedPower !== 'OFF') {
+    if ($voltage !== null && $voltage >= $threshold) $resolvedPower = 'ON';
+    elseif ($voltage !== null) $resolvedPower = 'OFF';
+}
+
+$isPowerOn = $resolvedPower === 'ON';
 $schedule = isScheduledOutageNow($pdo);
 $todayStats = getTodayStats($pdo);
 $weekStats = getWeekStats($pdo);
@@ -627,7 +661,7 @@ $durText = fmtDur($duration);
             let prevOff = false;
             data.forEach((d, i) => {
                 const x = pad.left + ((d.ts - timeStart) / timeRange) * (w - pad.left - pad.right);
-                const isOff = d.power_state === 'LIGHT_OFF' || d.voltage < 50;
+                const isOff = d.power_state === 'OFF' || d.voltage < 50;
                 
                 if (isOff) {
                     if (!prevOff && i > 0) ctx.stroke();
@@ -651,7 +685,7 @@ $durText = fmtDur($duration);
             let offStart = null;
             
             data.forEach((d, i) => {
-                const isOff = d.power_state === 'LIGHT_OFF' || d.voltage < 50;
+                const isOff = d.power_state === 'OFF' || d.voltage < 50;
                 const x = pad.left + ((d.ts - timeStart) / timeRange) * (w - pad.left - pad.right);
                 
                 if (isOff && offStart === null) {

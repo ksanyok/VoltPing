@@ -375,9 +375,6 @@ $latency = $result['latency_ms'] ?? 0;
 $method = $result['method'] ?? 'unknown';
 $error = $result['error'] ?? null;
 
-// Log request
-logRequest($pdo, $now, $method, $online ? 200 : 500, $voltage, $online ? 'ON' : 'OFF', $online, $latency, $error);
-
 // Determine power state
 $powerState = 'UNKNOWN';
 if ($online) {
@@ -394,6 +391,22 @@ if ($voltage !== null) {
     $voltState = voltageStatus($voltage, $config);
 }
 
+// Effective power state for logs/graphs (fallback if powerState is UNKNOWN)
+$effectivePowerState = $powerState !== 'UNKNOWN' ? $powerState : ($online ? 'ON' : 'OFF');
+
+// Log request
+logRequest($pdo, $now, $method, $online ? 200 : 500, $voltage, $effectivePowerState, $online, $latency, $error);
+
+// Append voltage point for UI cardiogram
+if ($voltage !== null) {
+    try {
+        $st = $pdo->prepare('INSERT INTO voltage_log(ts, voltage, power_state) VALUES(?, ?, ?)');
+        $st->execute([$now, $voltage, $effectivePowerState]);
+    } catch (Throwable $e) {
+        // Non-fatal
+    }
+}
+
 // Update state in DB
 dbSet($pdo, 'last_check_ts', (string)$now);
 dbSet($pdo, 'device_online', $online ? '1' : '0');
@@ -404,9 +417,29 @@ if ($voltage !== null) {
     dbSet($pdo, 'last_voltage_state', $voltState);
 }
 
+// Initialize power/voltage change timestamps on first known values
+$powerInitialized = false;
+if ($powerState !== 'UNKNOWN' && ($lastPowerState === 'UNKNOWN' || $lastPowerState === '')) {
+    $powerInitialized = true;
+    dbSet($pdo, 'last_power_state', $powerState);
+    dbSet($pdo, 'last_power_change_ts', (string)$now);
+    logEvent($pdo, $now, 'POWER', $powerState, $voltage, 'init');
+    $lastPowerState = $powerState;
+    $lastPowerTs = $now;
+}
+
+$voltageInitialized = false;
+if ($voltState !== 'UNKNOWN' && ($lastVoltState === 'UNKNOWN' || $lastVoltState === '')) {
+    $voltageInitialized = true;
+    dbSet($pdo, 'last_voltage_change_ts', (string)$now);
+    logEvent($pdo, $now, 'VOLTAGE', $voltState, $voltage, 'init');
+    $lastVoltState = $voltState;
+    $lastVoltTs = $now;
+}
+
 // ==================== POWER CHANGE NOTIFICATION ====================
 
-$powerChanged = ($powerState !== 'UNKNOWN' && $powerState !== $lastPowerState && $lastPowerState !== 'UNKNOWN');
+$powerChanged = (!$powerInitialized && $powerState !== 'UNKNOWN' && $powerState !== $lastPowerState);
 
 if ($powerChanged) {
     dbSet($pdo, 'last_power_state', $powerState);
@@ -443,7 +476,7 @@ if ($powerChanged) {
 
 // ==================== VOLTAGE CHANGE NOTIFICATION ====================
 
-$voltageChanged = ($voltState !== 'UNKNOWN' && $voltState !== $lastVoltState && $lastVoltState !== 'UNKNOWN');
+$voltageChanged = (!$voltageInitialized && $voltState !== 'UNKNOWN' && $voltState !== $lastVoltState);
 
 // Check if need to repeat notification
 $notifyRepeatMinutes = (int)($config['notify_repeat_minutes'] ?? 60);
