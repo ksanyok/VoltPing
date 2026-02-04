@@ -496,6 +496,30 @@ if ($isAuthenticated && isset($_GET['api'])) {
                 'pages' => ceil($total / $perPage),
             ], JSON_UNESCAPED_UNICODE);
             exit;
+
+        case 'get_checks':
+            $page = max(1, (int)($_GET['page'] ?? 1));
+            $perPage = 50;
+            $offset = ($page - 1) * $perPage;
+
+            // request_logs might not exist on very old DBs
+            try {
+                $total = (int)$pdo->query("SELECT COUNT(*) FROM request_logs")->fetchColumn();
+                $stmt = $pdo->prepare("SELECT ts, request_type, response_code, voltage, power_state, device_online, latency_ms, error_msg, note FROM request_logs ORDER BY ts DESC LIMIT {$perPage} OFFSET {$offset}");
+                $stmt->execute();
+                $checks = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            } catch (Throwable $e) {
+                $total = 0;
+                $checks = [];
+            }
+
+            echo json_encode([
+                'checks' => $checks,
+                'total' => $total,
+                'page' => $page,
+                'pages' => $total > 0 ? ceil($total / $perPage) : 1,
+            ], JSON_UNESCAPED_UNICODE);
+            exit;
     }
 }
 
@@ -1267,13 +1291,17 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
         <p style="color: var(--muted); margin-bottom: 1rem;">
             Зберігається <?= $historyRetentionDays ?> днів. Змінити можна в налаштуваннях.
         </p>
+        <p style="color: var(--muted); margin-bottom: 1rem; font-size: 0.9rem;">
+            <b>Перевірки</b> — кожен виклик poller-а (таблиця <code>request_logs</code>). <b>Події</b> — тільки зміни стану (таблиця <code>events</code>).
+        </p>
         
         <div class="event-filters">
-            <button class="active" data-filter="">Всі</button>
-            <button data-filter="POWER">🔌 Живлення</button>
-            <button data-filter="VOLTAGE">⚡ Напруга</button>
-            <button data-filter="DEVICE">📱 Пристрій</button>
-            <button data-filter="API">🌐 API</button>
+            <button class="active" data-mode="checks" data-filter="">🕒 Перевірки</button>
+            <button data-mode="events" data-filter="">Всі події</button>
+            <button data-mode="events" data-filter="POWER">🔌 Живлення</button>
+            <button data-mode="events" data-filter="VOLTAGE">⚡ Напруга</button>
+            <button data-mode="events" data-filter="DEVICE">📱 Пристрій</button>
+            <button data-mode="events" data-filter="API">🌐 API</button>
         </div>
         
         <table id="eventsTable">
@@ -1706,6 +1734,7 @@ $recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
 const API_LIMIT = 30000;
 let currentEventPage = 1;
 let currentEventFilter = '';
+let currentHistoryMode = 'checks';
 
 document.addEventListener('DOMContentLoaded', () => {
     checkUpdate();
@@ -1715,6 +1744,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.event-filters button').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
+            currentHistoryMode = btn.dataset.mode || 'events';
             currentEventFilter = btn.dataset.filter;
             currentEventPage = 1;
             loadEvents();
@@ -1773,12 +1803,54 @@ async function loadEvents() {
     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Завантаження...</td></tr>';
     
     try {
+        if (currentHistoryMode === 'checks') {
+            const res = await fetch(`?api=get_checks&page=${currentEventPage}`);
+            const data = await res.json();
+            const checks = data.checks || [];
+
+            if (checks.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Перевірок не знайдено</td></tr>';
+            } else {
+                tbody.innerHTML = checks.map(c => {
+                    const type = c.request_type || '';
+                    const online = (c.device_online === 1 || c.device_online === '1');
+                    const state = c.power_state || (online ? 'ONLINE' : 'OFFLINE');
+                    const icon = online ? '📡' : '📴';
+
+                    const date = new Date((c.ts || 0) * 1000);
+                    const dateStr = date.toLocaleDateString('uk-UA') + ' ' + date.toLocaleTimeString('uk-UA');
+
+                    const code = c.response_code !== null && c.response_code !== undefined ? String(c.response_code) : '—';
+                    const latency = c.latency_ms !== null && c.latency_ms !== undefined ? `${c.latency_ms}ms` : '—';
+                    const err = c.error_msg ? `; ${c.error_msg}` : '';
+                    const note = `${type || 'check'}; HTTP ${code}; ${latency}${err}`;
+
+                    return `<tr>
+                        <td>${icon} ${type || 'CHECK'}</td>
+                        <td>${state || '—'}</td>
+                        <td>${c.voltage ? Math.round(c.voltage) + 'V' : '—'}</td>
+                        <td>${dateStr}</td>
+                        <td style="color: var(--muted); font-size: 0.85rem;">${note}</td>
+                    </tr>`;
+                }).join('');
+            }
+
+            // Pagination
+            const pagination = document.getElementById('eventsPagination');
+            let paginationHtml = '';
+            paginationHtml += `<button ${data.page <= 1 ? 'disabled' : ''} onclick="goToEventPage(${data.page - 1})">← Назад</button>`;
+            paginationHtml += `<button class="active" disabled>Сторінка ${data.page} з ${data.pages}</button>`;
+            paginationHtml += `<button ${data.page >= data.pages ? 'disabled' : ''} onclick="goToEventPage(${data.page + 1})">Вперед →</button>`;
+            pagination.innerHTML = paginationHtml;
+            return;
+        }
+
         let url = `?api=get_events&page=${currentEventPage}`;
         if (currentEventFilter) url += `&type=${currentEventFilter}`;
-        
+
         const res = await fetch(url);
         const data = await res.json();
-        
+
         if (data.events.length === 0) {
             tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Подій не знайдено</td></tr>';
         } else {
@@ -1790,10 +1862,10 @@ async function loadEvents() {
                 else if (type === 'VOLTAGE') typeIcon = '⚡';
                 else if (type === 'DEVICE') typeIcon = '📱';
                 else if (type === 'API') typeIcon = '🌐';
-                
+
                 const date = new Date(e.ts * 1000);
                 const dateStr = date.toLocaleDateString('uk-UA') + ' ' + date.toLocaleTimeString('uk-UA');
-                
+
                 return `<tr>
                     <td>${typeIcon} ${type}</td>
                     <td>${state || '—'}</td>

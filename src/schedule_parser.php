@@ -34,14 +34,17 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
     $foundSchedules = [];
     $date = null;
     $debugInfo = [];
+    $candidates = [];
+    $today = date('Y-m-d');
     
+    // Collect all messages with schedules for our group
     foreach ($messages as $msg) {
-        $text = $msg['text'] ?? '';
+        $text = normalizeScheduleText($msg['text'] ?? '');
         if (empty($text)) continue;
         
         // Check if this message contains our group
         $targetMain = explode('.', $targetQueue)[0];
-        $groupPattern = '/Групи\s+' . preg_quote($targetMain, '/') . '\.\d/ui';
+        $groupPattern = '/Груп(?:и|а)\s+' . preg_quote($targetMain, '/') . '\.\d/ui';
         
         if (!preg_match($groupPattern, $text)) {
             continue;
@@ -51,20 +54,37 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
         
         // Extract date from message
         $msgDate = extractDateFromText($text);
-        if ($msgDate) {
-            $date = $msgDate;
-        }
         
         // Parse schedules for target queue
         $schedules = parseScheduleText($text, $targetQueue);
         
         if (!empty($schedules)) {
-            $foundSchedules = $schedules;
-            if (!$date) {
-                $date = date('Y-m-d');
-            }
-            break;
+            $candidates[] = [
+                'date' => $msgDate ?: $today,
+                'schedules' => $schedules,
+            ];
         }
+    }
+    
+    // Pick the best candidate: prefer the most recent future date (latest date >= today)
+    if (!empty($candidates)) {
+        usort($candidates, function($a, $b) use ($today) {
+            // Filter: only future/today dates have priority over past dates
+            $aIsFuture = $a['date'] >= $today;
+            $bIsFuture = $b['date'] >= $today;
+            
+            if ($aIsFuture !== $bIsFuture) {
+                return $bIsFuture ? 1 : -1; // future wins
+            }
+            
+            // Among future dates: pick the LATEST (farthest from today but still relevant)
+            // Among past dates: also pick the latest (most recent)
+            return strcmp($b['date'], $a['date']); // reverse: b > a means b comes first
+        });
+        
+        $best = $candidates[0];
+        $foundSchedules = $best['schedules'];
+        $date = $best['date'];
     }
     
     if (empty($foundSchedules)) {
@@ -99,6 +119,26 @@ function parseChannelSchedule(PDO $pdo, string $botToken, string $channelId, str
         'date' => $date,
         'schedules' => $foundSchedules,
     ];
+}
+
+/**
+ * Normalize schedule text for robust regex matching.
+ * Telegram web view may include NBSP / narrow NBSP / ZWSP.
+ */
+function normalizeScheduleText(string $text): string {
+    if ($text === '') return '';
+
+    $replacements = [
+        "\u{00A0}" => ' ', // NBSP
+        "\u{202F}" => ' ', // narrow NBSP
+        "\u{2007}" => ' ', // figure space
+        "\u{200B}" => '',  // zero width space
+        "\u{FEFF}" => '',  // BOM/zero width no-break
+    ];
+    $text = strtr($text, $replacements);
+    // Normalize newlines and trim
+    $text = preg_replace("/\r\n?/u", "\n", $text);
+    return trim((string)$text);
 }
 
 /**
@@ -137,7 +177,7 @@ function getChannelMessages(string $channelId, int $limit = 30): array {
             $text = trim($text);
             
             if ($text) {
-                $messages[] = ['text' => $text];
+                $messages[] = ['text' => normalizeScheduleText($text)];
             }
         }
     }
@@ -200,26 +240,23 @@ function extractDateFromText(string $text): ?string {
  */
 function parseScheduleText(string $text, string $targetQueue): array {
     $schedules = [];
+
+    $text = normalizeScheduleText($text);
     
     // Normalize target queue (4.1, 4.2, etc.)
     $targetQueue = trim($targetQueue);
     $targetMain = explode('.', $targetQueue)[0];
     $targetSub = $targetQueue; // Full queue like "4.1"
     
-    // Find the section for our group
-    $groupPattern = '/Групи\s+' . preg_quote($targetMain, '/') . '\.\d\s+(і|и)\s+' . preg_quote($targetMain, '/') . '\.\d/ui';
-    
-    if (!preg_match($groupPattern, $text)) {
-        return [];
-    }
+    // Find the section for our group (we don't hard-require "X.1 і X.2" because channels vary)
     
     // Extract the section for our group
-    // Split by "Групи X.X і X.X" patterns
-    $sections = preg_split('/(?=Групи\s+\d+\.\d)/ui', $text);
+    // Split by group headers
+    $sections = preg_split('/(?=Груп(?:и|а)\s+\d+\.\d)/ui', $text);
     
     $ourSection = '';
     foreach ($sections as $section) {
-        if (preg_match('/^Групи\s+' . preg_quote($targetMain, '/') . '\.\d/ui', $section)) {
+        if (preg_match('/^Груп(?:и|а)\s+' . preg_quote($targetMain, '/') . '\.\d/ui', $section)) {
             $ourSection = $section;
             break;
         }
@@ -236,7 +273,8 @@ function parseScheduleText(string $text, string $targetQueue): array {
     $events = [];
     
     // Match all time events
-    preg_match_all('/(⚫️|🟢|⚫|🔴)?\s*(\d{1,2}):(\d{2})\s*(відкл|увімк|откл|вкл)[^\(]*(?:\((\d+\.\d+)\))?/ui', $ourSection, $matches, PREG_SET_ORDER);
+    // NOTE: do not allow the match to span multiple lines; otherwise one match can swallow many events.
+    preg_match_all('/(⚫️|🟢|⚫|🔴)?\s*(\d{1,2}):(\d{2})\s*(відкл|відключ|увімк|увімкн|откл|вкл)[^\(\r\n]*(?:\((\d+\.\d+)\))?/ui', $ourSection, $matches, PREG_SET_ORDER);
     
     foreach ($matches as $m) {
         $emoji = $m[1] ?? '';
