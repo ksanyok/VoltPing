@@ -35,9 +35,11 @@ function getEmbeddedFiles(): array {
 $FILES_TO_DOWNLOAD = [
     'src/config.php',
     'src/tuya_client.php', 
+    'src/tuya_local_client.php',
     'src/watch_power.php',
     'src/bot.php',
     'src/admin.php',
+    'src/schedule_parser.php',
 ];
 
 // ============================================================================
@@ -431,10 +433,30 @@ function saveConfig(array $data): array {
         $adminPass = bin2hex(random_bytes(8));
     }
     
+    // Extract bot username from Telegram if token is provided
+    $botUsername = '';
+    $token = $data['telegram_token'] ?? '';
+    if ($token !== '') {
+        $ch = curl_init("https://api.telegram.org/bot{$token}/getMe");
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 10,
+        ]);
+        $resp = curl_exec($ch);
+        curl_close($ch);
+        if ($resp) {
+            $json = json_decode($resp, true);
+            if (($json['ok'] ?? false) && isset($json['result']['username'])) {
+                $botUsername = $json['result']['username'];
+            }
+        }
+    }
+    
     $config = [
         'PROJECT_NAME' => $data['project_name'] ?? 'VoltPing',
         'ADMIN_PASSWORD' => $adminPass,
-        'TG_BOT_TOKEN' => $data['telegram_token'] ?? '',
+        'TG_BOT_TOKEN' => $token,
+        'TG_BOT_USERNAME' => $botUsername,
         'TUYA_DEVICE_ID' => $data['tuya_device_id'] ?? '',
         'TUYA_ACCESS_ID' => $data['tuya_access_id'] ?? '',
         'TUYA_ACCESS_SECRET' => $data['tuya_access_secret'] ?? '',
@@ -455,10 +477,20 @@ function saveConfig(array $data): array {
         }
     }
     
-    $envPath = __DIR__ . '/.env';
-    if (file_put_contents($envPath, $envContent) === false) {
-        return ['success' => false, 'error' => 'Failed to write .env file'];
+    // Write .env to src directory (where config.php looks)
+    $srcDir = __DIR__ . '/src';
+    if (!is_dir($srcDir)) {
+        mkdir($srcDir, 0755, true);
     }
+    
+    $envPathSrc = $srcDir . '/.env';
+    if (file_put_contents($envPathSrc, $envContent) === false) {
+        return ['success' => false, 'error' => 'Failed to write src/.env file'];
+    }
+    
+    // Also write to root for compatibility
+    $envPathRoot = __DIR__ . '/.env';
+    file_put_contents($envPathRoot, $envContent);
     
     // Store admin password in session for display
     $_SESSION['admin_password'] = $adminPass;
@@ -467,18 +499,18 @@ function saveConfig(array $data): array {
 }
 
 function setupDatabase(): array {
-    $dbPath = __DIR__ . '/data/voltping.sqlite';
-    
-    // Create data directory
-    $dataDir = dirname($dbPath);
-    if (!is_dir($dataDir)) {
-        mkdir($dataDir, 0755, true);
+    // Database in src directory (where config.php expects it)
+    $srcDir = __DIR__ . '/src';
+    if (!is_dir($srcDir)) {
+        mkdir($srcDir, 0755, true);
     }
+    
+    $dbPath = $srcDir . '/voltping.sqlite';
     
     try {
         $db = new SQLite3($dbPath);
         
-        // State table
+        // Create minimal state table - config.php will add all other tables
         $db->exec("CREATE TABLE IF NOT EXISTS state (
             id INTEGER PRIMARY KEY,
             is_on INTEGER DEFAULT 1,
@@ -489,49 +521,17 @@ function setupDatabase(): array {
             local_key TEXT
         )");
         
-        // Events table
-        $db->exec("CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_type TEXT NOT NULL,
-            voltage REAL,
-            power REAL,
-            message TEXT,
-            created_at TEXT DEFAULT (datetime('now', 'localtime'))
-        )");
-        
-        // Subscribers table
-        $db->exec("CREATE TABLE IF NOT EXISTS subscribers (
-            chat_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            is_active INTEGER DEFAULT 1,
-            dashboard_message_id INTEGER,
-            notify_power INTEGER DEFAULT 1,
-            notify_voltage INTEGER DEFAULT 1,
-            notify_schedule INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT (datetime('now', 'localtime')),
-            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
-        )");
-        
-        // Schedules table
-        $db->exec("CREATE TABLE IF NOT EXISTS schedules (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            queue INTEGER NOT NULL,
-            date TEXT NOT NULL,
-            intervals TEXT,
-            raw_message TEXT,
-            created_at TEXT DEFAULT (datetime('now', 'localtime')),
-            UNIQUE(queue, date)
-        )");
-        
         // Initialize state
         $db->exec("INSERT OR IGNORE INTO state (id, is_on, updated_at) VALUES (1, 1, datetime('now', 'localtime'))");
         
-        // Create indexes
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at)");
-        $db->exec("CREATE INDEX IF NOT EXISTS idx_schedules_date ON schedules(date)");
-        
         $db->close();
+        
+        // Now use config.php to create all proper tables
+        if (file_exists(__DIR__ . '/src/config.php')) {
+            require_once __DIR__ . '/src/config.php';
+            $config = getConfig();
+            getDatabase($config); // This creates all tables properly
+        }
         
         return ['success' => true];
         

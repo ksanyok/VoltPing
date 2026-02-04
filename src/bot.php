@@ -491,27 +491,54 @@ function buildScheduleText(PDO $pdo): string {
 // ==================== ACTION MAPPING ====================
 
 function actionFromText(string $text): string {
-    $text = mb_strtolower(trim($text), 'UTF-8');
+    $lower = mb_strtolower(trim($text), 'UTF-8');
     
+    // Match exact button texts first (case-insensitive)
+    $buttonMap = [
+        '📌 поточна інформація' => 'dashboard',
+        '🔌 перевірити світло' => 'check_power',
+        '⚡ перевірити напругу' => 'check_voltage',
+        '📡 стан зараз' => 'status',
+        '📊 статистика' => 'stats',
+        '🧾 історія' => 'history',
+        '📅 графік відключень' => 'schedule',
+        '⚙️ налаштування' => 'settings',
+        '🔔 увімкнути сповіщення' => 'notify_on',
+        '🔕 вимкнути сповіщення' => 'notify_off',
+        'ℹ️ про бота' => 'about',
+        '◀️ назад' => 'back',
+        '👥 користувачі' => 'admin_users',
+        '🔧 адмін-панель' => 'admin_panel',
+        '📅 сьогодні' => 'history_today',
+        '📅 вчора' => 'history_yesterday',
+        '📅 тиждень' => 'history_week',
+        '📅 місяць' => 'history_month',
+    ];
+    
+    if (isset($buttonMap[$lower])) {
+        return $buttonMap[$lower];
+    }
+    
+    // Fallback to partial matching
     return match (true) {
-        str_contains($text, 'поточна') || str_contains($text, 'інформація') || $text === '📌 поточна інформація' => 'dashboard',
-        str_contains($text, 'перевірити світло') || str_contains($text, '🔌') => 'check_power',
-        str_contains($text, 'перевірити напругу') || str_contains($text, 'напругу') => 'check_voltage',
-        str_contains($text, 'стан зараз') || str_contains($text, '📡') => 'status',
-        str_contains($text, 'статистика') || str_contains($text, '📊') => 'stats',
-        str_contains($text, 'історія') || str_contains($text, '🧾') => 'history',
-        str_contains($text, 'графік') || str_contains($text, '📅') => 'schedule',
-        str_contains($text, 'налаштування') || str_contains($text, '⚙️') => 'settings',
-        str_contains($text, 'увімкнути') || str_contains($text, '🔔') => 'notify_on',
-        str_contains($text, 'вимкнути') || str_contains($text, '🔕') => 'notify_off',
-        str_contains($text, 'про бота') || str_contains($text, 'ℹ️') => 'about',
-        str_contains($text, 'назад') || str_contains($text, '◀️') => 'back',
-        str_contains($text, 'користувачі') || str_contains($text, '👥') => 'admin_users',
-        str_contains($text, 'сьогодні') => 'history_today',
-        str_contains($text, 'вчора') => 'history_yesterday',
-        str_contains($text, 'тиждень') => 'history_week',
-        str_contains($text, 'місяць') => 'history_month',
-        str_contains($text, 'admin') || str_contains($text, 'адмін') => 'admin_panel',
+        str_contains($lower, 'поточна інформація') => 'dashboard',
+        str_contains($lower, 'перевірити світло') => 'check_power',
+        str_contains($lower, 'перевірити напругу') => 'check_voltage',
+        str_contains($lower, 'стан зараз') => 'status',
+        str_contains($lower, 'статистика') => 'stats',
+        str_contains($lower, 'історія') => 'history',
+        str_contains($lower, 'графік') => 'schedule',
+        str_contains($lower, 'налаштування') => 'settings',
+        str_contains($lower, 'увімкнути') => 'notify_on',
+        str_contains($lower, 'вимкнути') => 'notify_off',
+        str_contains($lower, 'про бота') => 'about',
+        str_contains($lower, 'назад') => 'back',
+        str_contains($lower, 'користувачі') => 'admin_users',
+        str_contains($lower, 'сьогодні') => 'history_today',
+        str_contains($lower, 'вчора') => 'history_yesterday',
+        str_contains($lower, 'тиждень') => 'history_week',
+        str_contains($lower, 'місяць') => 'history_month',
+        str_contains($lower, 'адмін') => 'admin_panel',
         default => '',
     };
 }
