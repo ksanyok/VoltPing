@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 /**
- * VoltPing - Admin Panel v1.2.0
+ * VoltPing - Admin Panel v1.3.0
  * Повноцінна веб-панель адміністрування
  */
 
@@ -10,6 +10,17 @@ require_once __DIR__ . '/config.php';
 
 $config = getConfig();
 $pdo = getDatabase($config);
+
+// ==================== AUTO-CLEANUP OLD RECORDS ====================
+function cleanupOldRecords(PDO $pdo, int $retentionDays = 30): void {
+    $cutoff = time() - ($retentionDays * 86400);
+    $pdo->prepare("DELETE FROM events WHERE ts < ?")->execute([$cutoff]);
+    $pdo->prepare("DELETE FROM api_stats WHERE ts < ?")->execute([$cutoff]);
+}
+
+// Run cleanup on each request (low overhead with indexed tables)
+$retentionDays = (int)(dbGet($pdo, 'history_retention_days') ?? 30);
+cleanupOldRecords($pdo, $retentionDays);
 
 // ==================== AUTHENTICATION ====================
 session_start();
@@ -34,7 +45,7 @@ if (isset($_GET['logout'])) {
 
 // ==================== CURRENT TAB ====================
 $currentTab = $_GET['tab'] ?? 'dashboard';
-$validTabs = ['dashboard', 'schedule', 'messages', 'notifications', 'users', 'settings', 'updates'];
+$validTabs = ['dashboard', 'history', 'schedule', 'messages', 'notifications', 'users', 'settings', 'updates'];
 if (!in_array($currentTab, $validTabs)) {
     $currentTab = 'dashboard';
 }
@@ -211,6 +222,12 @@ if ($isAuthenticated && isset($_GET['api'])) {
             $envContent = file_exists($envPath) ? file_get_contents($envPath) : '';
             
             foreach ($input as $key => $value) {
+                // Skip DB-only settings
+                if (in_array($key, ['HISTORY_RETENTION_DAYS'])) {
+                    dbSet($pdo, strtolower($key), (string)$value);
+                    continue;
+                }
+                
                 $pattern = '/^' . preg_quote($key, '/') . '=.*/m';
                 $replacement = "{$key}={$value}";
                 if (preg_match($pattern, $envContent)) {
@@ -264,7 +281,7 @@ if ($isAuthenticated && isset($_GET['api'])) {
             );
             $body = str_replace('\n', "\n", $body);
             
-            $botToken = $config['tg_bot_token'] ?? '';
+            $botToken = $config['tg_token'] ?? '';
             if (!$botToken) {
                 echo json_encode(['ok' => false, 'error' => 'Bot token not configured']);
                 exit;
@@ -300,16 +317,38 @@ if ($isAuthenticated && isset($_GET['api'])) {
                 exit;
             }
             
-            $botToken = $config['tg_bot_token'] ?? '';
-            if (!$botToken) {
-                echo json_encode(['ok' => false, 'error' => 'Bot token not configured']);
-                exit;
-            }
+            $botToken = $config['tg_token'] ?? '';
             
             // Get channel messages via Telegram API
             $result = parseChannelSchedule($pdo, $botToken, $channelId, $queue);
             
             echo json_encode($result, JSON_UNESCAPED_UNICODE);
+            exit;
+            
+        case 'get_events':
+            $page = max(1, (int)($_GET['page'] ?? 1));
+            $perPage = 50;
+            $offset = ($page - 1) * $perPage;
+            $typeFilter = $_GET['type'] ?? '';
+            
+            $where = '';
+            $params = [];
+            if ($typeFilter && in_array($typeFilter, ['POWER', 'VOLTAGE', 'DEVICE', 'API'])) {
+                $where = 'WHERE type = ?';
+                $params[] = $typeFilter;
+            }
+            
+            $total = (int)$pdo->query("SELECT COUNT(*) FROM events {$where}")->fetchColumn();
+            $stmt = $pdo->prepare("SELECT * FROM events {$where} ORDER BY ts DESC LIMIT {$perPage} OFFSET {$offset}");
+            $stmt->execute($params);
+            $events = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            echo json_encode([
+                'events' => $events,
+                'total' => $total,
+                'page' => $page,
+                'pages' => ceil($total / $perPage),
+            ], JSON_UNESCAPED_UNICODE);
             exit;
     }
 }
@@ -346,7 +385,7 @@ if ($isAuthenticated && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['a
             $target = $_POST['target'] ?? 'all_active';
             
             if ($message) {
-                $botToken = $config['tg_bot_token'] ?? '';
+                $botToken = $config['tg_token'] ?? '';
                 $sent = 0;
                 
                 if ($target === 'admins') {
@@ -450,7 +489,17 @@ $scheduleChannelId = getDbSetting($pdo, 'schedule_channel_id', '');
 $scheduleQueue = getDbSetting($pdo, 'schedule_queue', '4.1');
 $scheduleParseEnabled = getDbSetting($pdo, 'schedule_parse_enabled', '0') === '1';
 
+// History retention
+$historyRetentionDays = (int)getDbSetting($pdo, 'history_retention_days', '30');
+
 $projectName = $config['project_name'] ?? 'VoltPing';
+
+// Bot link
+$botUsername = $config['tg_bot_username'] ?? '';
+$botLink = $config['tg_bot_link'] ?? '';
+if (!$botLink && $botUsername) {
+    $botLink = "https://t.me/" . ltrim($botUsername, '@');
+}
 
 // Calculate API limits
 $checkInterval = (int)($config['check_interval_seconds'] ?? 60);
@@ -459,6 +508,14 @@ $requestsPerMonth = $requestsPerDay * 30;
 $apiLimit = 30000;
 $limitPercent = min(100, round($requestsPerMonth / $apiLimit * 100));
 $limitOk = $requestsPerMonth <= $apiLimit;
+
+// Calculate days until limit exhausted
+$currentMonthUsage = $apiStats['month'] ?? 0;
+$daysLeft = floor(($apiLimit - $currentMonthUsage) / max(1, $requestsPerDay));
+
+// Recommended interval (to stay within 80% of limit)
+$targetDailyRequests = ($apiLimit * 0.8) / 30;
+$recommendedInterval = max(30, ceil(86400 / $targetDailyRequests));
 
 // ==================== HTML OUTPUT ====================
 ?>
@@ -500,13 +557,28 @@ $limitOk = $requestsPerMonth <= $apiLimit;
             padding: 1rem 0;
             border-bottom: 1px solid var(--border);
             margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
         
         header h1 { font-size: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
         
-        .header-actions { display: flex; gap: 1rem; align-items: center; }
+        .header-actions { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
         .header-actions a { color: var(--muted); text-decoration: none; font-size: 0.9rem; }
         .header-actions a:hover { color: var(--text); }
+        
+        .bot-link {
+            background: linear-gradient(135deg, #0088cc 0%, #0066aa 100%);
+            color: white !important;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .bot-link:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 136, 204, 0.4);
+        }
         
         .flash {
             padding: 1rem;
@@ -717,6 +789,65 @@ $limitOk = $requestsPerMonth <= $apiLimit;
             transition: width 0.3s;
         }
         
+        .api-calc {
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+        
+        .api-calc-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.3rem 0;
+        }
+        
+        .api-calc-label { color: var(--muted); }
+        .api-calc-value { font-weight: 600; }
+        .api-calc-value.good { color: var(--success); }
+        .api-calc-value.warn { color: var(--warning); }
+        .api-calc-value.bad { color: var(--danger); }
+        
+        .pagination {
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+            margin-top: 1rem;
+        }
+        
+        .pagination button {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--border);
+            background: var(--card);
+            color: var(--text);
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        
+        .pagination button:hover { background: var(--bg); }
+        .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .pagination button.active { background: var(--accent); border-color: var(--accent); }
+        
+        .event-filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+        
+        .event-filters button {
+            padding: 0.4rem 0.8rem;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--muted);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        
+        .event-filters button:hover { color: var(--text); }
+        .event-filters button.active { background: var(--accent); color: white; border-color: var(--accent); }
+        
         /* Login */
         .login-container {
             min-height: 100vh;
@@ -768,6 +899,9 @@ $limitOk = $requestsPerMonth <= $apiLimit;
         <h1>⚙️ <?= h($projectName) ?></h1>
         <div class="header-actions">
             <span style="color: var(--muted);">v<?= VOLTPING_VERSION ?></span>
+            <?php if ($botLink): ?>
+                <a href="<?= h($botLink) ?>" target="_blank" class="bot-link">🤖 Telegram Bot</a>
+            <?php endif; ?>
             <a href="../">🏠 На сайт</a>
             <a href="?logout">🚪 Вийти</a>
         </div>
@@ -787,6 +921,7 @@ $limitOk = $requestsPerMonth <= $apiLimit;
     
     <div class="tabs">
         <a href="?tab=dashboard" class="tab <?= $currentTab === 'dashboard' ? 'active' : '' ?>">📊 Огляд</a>
+        <a href="?tab=history" class="tab <?= $currentTab === 'history' ? 'active' : '' ?>">📋 Історія</a>
         <a href="?tab=schedule" class="tab <?= $currentTab === 'schedule' ? 'active' : '' ?>">📅 Графік</a>
         <a href="?tab=messages" class="tab <?= $currentTab === 'messages' ? 'active' : '' ?>">✉️ Розсилка</a>
         <a href="?tab=notifications" class="tab <?= $currentTab === 'notifications' ? 'active' : '' ?>">🔔 Сповіщення</a>
@@ -829,7 +964,17 @@ $limitOk = $requestsPerMonth <= $apiLimit;
                 <?php foreach (array_slice($events, 0, 10) as $e): ?>
                     <tr>
                         <td>
-                            <?= $e['type'] === 'LIGHT_ON' ? '🟢 Увімкнення' : '🔴 Відключення' ?>
+                            <?php 
+                            $type = $e['type'] ?? '';
+                            $state_e = $e['state'] ?? '';
+                            if ($type === 'POWER' || $type === 'LIGHT_ON' || $type === 'LIGHT_OFF') {
+                                echo ($state_e === 'ON' || $type === 'LIGHT_ON') ? '🟢 Увімкнення' : '🔴 Відключення';
+                            } elseif ($type === 'VOLTAGE') {
+                                echo '⚡ ' . h($state_e);
+                            } else {
+                                echo '📝 ' . h($type);
+                            }
+                            ?>
                         </td>
                         <td><?= $e['voltage'] ? round($e['voltage']) . 'V' : '—' ?></td>
                         <td><?= date('d.m H:i', $e['ts']) ?></td>
@@ -837,6 +982,9 @@ $limitOk = $requestsPerMonth <= $apiLimit;
                 <?php endforeach; ?>
                 </tbody>
             </table>
+            <div style="margin-top: 1rem; text-align: center;">
+                <a href="?tab=history" class="btn btn-outline btn-sm">📋 Вся історія</a>
+            </div>
         </div>
         
         <div class="card">
@@ -849,11 +997,30 @@ $limitOk = $requestsPerMonth <= $apiLimit;
             </form>
             
             <div class="card-title" style="margin-top: 1rem;">📊 API ліміти</div>
-            <p style="font-size: 0.9rem;">
-                Інтервал: <strong><?= $checkInterval ?> сек</strong><br>
-                Запитів/день: <strong><?= number_format($requestsPerDay, 0, ',', ' ') ?></strong><br>
-                Запитів/місяць: <strong><?= number_format($requestsPerMonth, 0, ',', ' ') ?></strong>
-            </p>
+            <div class="api-calc">
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Інтервал:</span>
+                    <span class="api-calc-value"><?= $checkInterval ?> сек</span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Запитів/день:</span>
+                    <span class="api-calc-value"><?= number_format($requestsPerDay, 0, ',', ' ') ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Запитів/місяць:</span>
+                    <span class="api-calc-value <?= $limitOk ? 'good' : 'bad' ?>"><?= number_format($requestsPerMonth, 0, ',', ' ') ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Використано:</span>
+                    <span class="api-calc-value"><?= number_format($currentMonthUsage, 0, ',', ' ') ?> / 30 000</span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Вистачить на:</span>
+                    <span class="api-calc-value <?= $daysLeft > 10 ? 'good' : ($daysLeft > 3 ? 'warn' : 'bad') ?>">
+                        <?= $daysLeft > 365 ? '> 1 року' : $daysLeft . ' днів' ?>
+                    </span>
+                </div>
+            </div>
             <div class="progress-bar">
                 <div class="fill" style="width: <?= $limitPercent ?>%; background: <?= $limitOk ? 'var(--success)' : 'var(--danger)' ?>;"></div>
             </div>
@@ -862,6 +1029,40 @@ $limitOk = $requestsPerMonth <= $apiLimit;
                 <?= $limitOk ? '✅' : '⚠️ Перевищення!' ?>
             </p>
         </div>
+    </div>
+    
+    <?php elseif ($currentTab === 'history'): ?>
+    <!-- History Tab -->
+    <div class="card">
+        <div class="card-title">📋 Історія подій</div>
+        <p style="color: var(--muted); margin-bottom: 1rem;">
+            Зберігається <?= $historyRetentionDays ?> днів. Змінити можна в налаштуваннях.
+        </p>
+        
+        <div class="event-filters">
+            <button class="active" data-filter="">Всі</button>
+            <button data-filter="POWER">🔌 Живлення</button>
+            <button data-filter="VOLTAGE">⚡ Напруга</button>
+            <button data-filter="DEVICE">📱 Пристрій</button>
+            <button data-filter="API">🌐 API</button>
+        </div>
+        
+        <table id="eventsTable">
+            <thead>
+                <tr>
+                    <th>Тип</th>
+                    <th>Стан</th>
+                    <th>Напруга</th>
+                    <th>Час</th>
+                    <th>Примітка</th>
+                </tr>
+            </thead>
+            <tbody id="eventsBody">
+                <!-- Loaded via JS -->
+            </tbody>
+        </table>
+        
+        <div class="pagination" id="eventsPagination"></div>
     </div>
     
     <?php elseif ($currentTab === 'schedule'): ?>
@@ -1114,6 +1315,11 @@ $limitOk = $requestsPerMonth <= $apiLimit;
                 <label>Заголовок каналу</label>
                 <input type="text" id="setting_channel_title" value="<?= h($config['channel_base_title'] ?? '') ?>">
             </div>
+            <div class="form-group">
+                <label>Зберігати історію (днів)</label>
+                <input type="number" id="setting_retention_days" value="<?= $historyRetentionDays ?>" min="1" max="365">
+                <div class="hint">Старі записи автоматично видаляються.</div>
+            </div>
         </div>
         
         <div class="card">
@@ -1139,16 +1345,40 @@ $limitOk = $requestsPerMonth <= $apiLimit;
         </div>
         
         <div class="card">
-            <div class="card-title">⏱️ Інтервали</div>
+            <div class="card-title">⏱️ Інтервали та API ліміти</div>
             <div class="form-group">
                 <label>Інтервал перевірки (секунди)</label>
-                <input type="number" id="setting_check_interval" value="<?= $config['check_interval_seconds'] ?? 60 ?>">
-                <div class="hint">
-                    Як часто опитувати пристрій. При 60 сек = 1440 запитів/день.<br>
-                    Ліміт Tuya: 30 000 запитів/місяць.
+                <input type="number" id="setting_check_interval" value="<?= $config['check_interval_seconds'] ?? 60 ?>" 
+                       min="10" max="3600" onchange="recalculateLimits()" oninput="recalculateLimits()">
+            </div>
+            
+            <div class="api-calc" id="apiCalcPreview">
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Запитів/день:</span>
+                    <span class="api-calc-value" id="calcDaily"><?= number_format($requestsPerDay, 0, ',', ' ') ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Запитів/місяць:</span>
+                    <span class="api-calc-value" id="calcMonthly"><?= number_format($requestsPerMonth, 0, ',', ' ') ?></span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">% від ліміту:</span>
+                    <span class="api-calc-value" id="calcPercent"><?= $limitPercent ?>%</span>
+                </div>
+                <div class="api-calc-row">
+                    <span class="api-calc-label">Рекомендовано:</span>
+                    <span class="api-calc-value good" id="calcRecommended"><?= $recommendedInterval ?> сек</span>
+                </div>
+                <div class="progress-bar" style="margin-top: 0.5rem;">
+                    <div class="fill" id="calcProgressBar" style="width: <?= $limitPercent ?>%; background: <?= $limitOk ? 'var(--success)' : 'var(--danger)' ?>;"></div>
                 </div>
             </div>
-            <div class="form-group">
+            
+            <button type="button" class="btn btn-outline btn-sm" style="margin-top: 0.5rem;" onclick="applyRecommended()">
+                ✨ Застосувати рекомендоване значення
+            </button>
+            
+            <div class="form-group" style="margin-top: 1rem;">
                 <label>Повторні сповіщення про напругу (хвилини)</label>
                 <input type="number" id="setting_notify_repeat" value="<?= $config['notify_repeat_minutes'] ?? 60 ?>">
                 <div class="hint">
@@ -1209,7 +1439,125 @@ $limitOk = $requestsPerMonth <= $apiLimit;
 </div>
 
 <script>
-document.addEventListener('DOMContentLoaded', checkUpdate);
+const API_LIMIT = 30000;
+let currentEventPage = 1;
+let currentEventFilter = '';
+
+document.addEventListener('DOMContentLoaded', () => {
+    checkUpdate();
+    
+    // Setup event filter buttons
+    document.querySelectorAll('.event-filters button').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.event-filters button').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentEventFilter = btn.dataset.filter;
+            currentEventPage = 1;
+            loadEvents();
+        });
+    });
+    
+    // Load events if on history tab
+    if (document.getElementById('eventsBody')) {
+        loadEvents();
+    }
+});
+
+function recalculateLimits() {
+    const interval = parseInt(document.getElementById('setting_check_interval')?.value) || 60;
+    const daily = Math.floor(86400 / interval);
+    const monthly = daily * 30;
+    const percent = Math.min(100, Math.round(monthly / API_LIMIT * 100));
+    const recommended = Math.max(30, Math.ceil(86400 / ((API_LIMIT * 0.8) / 30)));
+    
+    document.getElementById('calcDaily').textContent = daily.toLocaleString('uk-UA');
+    document.getElementById('calcMonthly').textContent = monthly.toLocaleString('uk-UA');
+    document.getElementById('calcPercent').textContent = percent + '%';
+    document.getElementById('calcRecommended').textContent = recommended + ' сек';
+    
+    const calcMonthly = document.getElementById('calcMonthly');
+    const calcPercent = document.getElementById('calcPercent');
+    const progressBar = document.getElementById('calcProgressBar');
+    
+    if (monthly <= API_LIMIT) {
+        calcMonthly.className = 'api-calc-value good';
+        calcPercent.className = 'api-calc-value good';
+        progressBar.style.background = 'var(--success)';
+    } else if (monthly <= API_LIMIT * 1.2) {
+        calcMonthly.className = 'api-calc-value warn';
+        calcPercent.className = 'api-calc-value warn';
+        progressBar.style.background = 'var(--warning)';
+    } else {
+        calcMonthly.className = 'api-calc-value bad';
+        calcPercent.className = 'api-calc-value bad';
+        progressBar.style.background = 'var(--danger)';
+    }
+    
+    progressBar.style.width = Math.min(100, percent) + '%';
+}
+
+function applyRecommended() {
+    const recommended = Math.max(30, Math.ceil(86400 / ((API_LIMIT * 0.8) / 30)));
+    document.getElementById('setting_check_interval').value = recommended;
+    recalculateLimits();
+}
+
+async function loadEvents() {
+    const tbody = document.getElementById('eventsBody');
+    if (!tbody) return;
+    
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Завантаження...</td></tr>';
+    
+    try {
+        let url = `?api=get_events&page=${currentEventPage}`;
+        if (currentEventFilter) url += `&type=${currentEventFilter}`;
+        
+        const res = await fetch(url);
+        const data = await res.json();
+        
+        if (data.events.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--muted);">Подій не знайдено</td></tr>';
+        } else {
+            tbody.innerHTML = data.events.map(e => {
+                const type = e.type || '';
+                const state = e.state || '';
+                let typeIcon = '📝';
+                if (type === 'POWER') typeIcon = state === 'ON' ? '🟢' : '🔴';
+                else if (type === 'VOLTAGE') typeIcon = '⚡';
+                else if (type === 'DEVICE') typeIcon = '📱';
+                else if (type === 'API') typeIcon = '🌐';
+                
+                const date = new Date(e.ts * 1000);
+                const dateStr = date.toLocaleDateString('uk-UA') + ' ' + date.toLocaleTimeString('uk-UA');
+                
+                return `<tr>
+                    <td>${typeIcon} ${type}</td>
+                    <td>${state || '—'}</td>
+                    <td>${e.voltage ? Math.round(e.voltage) + 'V' : '—'}</td>
+                    <td>${dateStr}</td>
+                    <td style="color: var(--muted); font-size: 0.85rem;">${e.note || ''}</td>
+                </tr>`;
+            }).join('');
+        }
+        
+        // Pagination
+        const pagination = document.getElementById('eventsPagination');
+        let paginationHtml = '';
+        
+        paginationHtml += `<button ${data.page <= 1 ? 'disabled' : ''} onclick="goToEventPage(${data.page - 1})">← Назад</button>`;
+        paginationHtml += `<button class="active" disabled>Сторінка ${data.page} з ${data.pages}</button>`;
+        paginationHtml += `<button ${data.page >= data.pages ? 'disabled' : ''} onclick="goToEventPage(${data.page + 1})">Вперед →</button>`;
+        
+        pagination.innerHTML = paginationHtml;
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--danger);">Помилка: ${e.message}</td></tr>`;
+    }
+}
+
+function goToEventPage(page) {
+    currentEventPage = page;
+    loadEvents();
+}
 
 async function checkUpdate() {
     try {
@@ -1283,6 +1631,7 @@ async function saveSettings() {
         CHECK_INTERVAL_SECONDS: document.getElementById('setting_check_interval')?.value || '60',
         NOTIFY_REPEAT_MINUTES: document.getElementById('setting_notify_repeat')?.value || '60',
         TUYA_MODE: document.getElementById('setting_tuya_mode')?.value || 'cloud',
+        HISTORY_RETENTION_DAYS: document.getElementById('setting_retention_days')?.value || '30',
     };
     
     try {
@@ -1365,11 +1714,12 @@ async function parseScheduleNow() {
         
         if (data.ok) {
             content.textContent = `✅ Знайдено записів: ${data.found}\n`;
+            content.textContent += `💾 Збережено: ${data.saved}\n`;
             content.textContent += `📅 Дата: ${data.date || '?'}\n`;
             if (data.schedules && data.schedules.length > 0) {
                 content.textContent += `\nГрафік:\n`;
                 data.schedules.forEach(s => {
-                    content.textContent += `  ${s.time_start} - ${s.time_end}\n`;
+                    content.textContent += `  ${s.start} - ${s.end}\n`;
                 });
             }
         } else {

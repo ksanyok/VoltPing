@@ -9,7 +9,7 @@ declare(strict_types=1);
  */
 
 // ==================== VERSION ====================
-define('VOLTPING_VERSION', '1.2.0');
+define('VOLTPING_VERSION', '1.3.0');
 
 // ==================== ENV LOADER ====================
 
